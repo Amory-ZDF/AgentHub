@@ -50,6 +50,8 @@ class CustomAgent(BaseModel):
     id: int
     name: str
     agent_id: str
+    icon: str = "smart_toy"
+    description: str = ""
     system_prompt: str
     llm_adapter: str
     tools: list[str] = []
@@ -63,6 +65,8 @@ class CustomAgent(BaseModel):
 class CustomAgentCreate(BaseModel):
     """用于创建自定义Agent的Schema"""
     name: str
+    icon: str = "smart_toy"
+    description: str = ""
     system_prompt: str
     llm_adapter: str = "tongyi"
     tools: list[str] = []
@@ -99,7 +103,8 @@ class UserCreate(UserBase):
     password: str
 
 class UserLogin(BaseModel):
-    username: str
+    """用户登录 - 使用 email 而非 username，与前端一致"""
+    email: str
     password: str
 
 class UserResponse(BaseModel):
@@ -115,6 +120,13 @@ class UserResponse(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+
+class AuthResponse(BaseModel):
+    """认证接口返回模型 - 匹配前端期望格式"""
+    ok: bool = True
+    user: dict
+    token: str
 
 class TokenData(BaseModel):
     user_id: Optional[int] = None
@@ -136,14 +148,15 @@ class SkillCreate(SkillBase):
 
 class SkillResponse(SkillBase):
     id: int
-    author_id: Optional[int]
-    author_name: str
-    is_published: bool
-    install_count: int
-    created_at: datetime
-    updated_at: datetime
+    authorId: Optional[int] = None
+    authorName: str = ''
+    isPublished: bool = False
+    installCount: int = 0
+    createdAt: Optional[datetime] = None
+    updatedAt: Optional[datetime] = None
     isMine: Optional[bool] = None
     isInstalled: Optional[bool] = None
-    
+    versions: Optional[list] = None
+
     class Config:
         from_attributes = True

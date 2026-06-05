@@ -3,56 +3,70 @@ from sqlalchemy.orm import Session
 from backend.app.dependencies import get_db
 from backend.models.custom_agent import CustomAgent as CustomAgentModel
 from backend.app.schemas import CustomAgent, CustomAgentCreate
+from backend.app.api.auth import get_current_user, try_get_current_user
+from backend.models.user import User as UserModel
 from backend.core.orchestrator import Orchestrator
 from backend.utils.logger import logger
 import uuid
+from typing import Optional
 
 # 全局初始化Orchestrator实例，和你的main.py里的初始化保持一致
 orchestrator = Orchestrator()
 
 router = APIRouter()
 
+
 @router.get("", response_model=list[CustomAgent])
-async def list_agents(db: Session = Depends(get_db)):
-    """获取所有可用的Agent（系统内置+用户创建的）"""
-    # 先从数据库拿用户创建的
-    db_agents = db.query(CustomAgentModel).filter(CustomAgentModel.is_active == True).all()
-    # 给系统Agent补全所有CustomAgent schema要求的必填字段，和用户创建的Agent格式完全一致，避免FastAPI验证错误
+async def list_agents(db: Session = Depends(get_db), current_user: Optional[UserModel] = Depends(try_get_current_user)):
+    """获取当前用户的自定义Agent + 系统内置Agent"""
+    # 只查询当前用户的自定义Agent
+    query = db.query(CustomAgentModel).filter(CustomAgentModel.is_active == True)
+    if current_user:
+        query = query.filter(CustomAgentModel.user_id == current_user.id)
+    else:
+        query = query.filter(CustomAgentModel.user_id == None)  # 未登录时只查无主的
+    db_agents = query.all()
+    # 给系统Agent补全所有字段
+    # ✨ 过滤掉 custom_ 开头的自定义Agent（它们已经作为 db_agents 返回，避免双显）
     from datetime import datetime
     system_agents = [
         {
-            "id": 0,  # 系统Agent的id用0占位，和用户创建的数据库自增id区分
-            "agent_id": aid, 
-            "name": aid, 
+            "id": 0,
+            "agent_id": aid,
+            "name": aid,
             "is_system": True,
             "system_prompt": "系统内置Agent",
             "llm_adapter": "system",
             "tools": [],
-            "created_at": datetime.now(),  # 补全合法的datetime，解决FastAPI验证错误
+            "created_at": datetime.now(),
             "is_active": True
-        } for aid in orchestrator.agents.keys()
+        } for aid in orchestrator.agents.keys() if not aid.startswith("custom_")
     ]
     return [*db_agents, *system_agents]
 
+
 @router.post("", response_model=CustomAgent)
-async def create_agent(req: CustomAgentCreate, db: Session = Depends(get_db)):
-    """创建新的自定义Agent，表单提交过来的内容直接落库+注册到Orchestrator"""
-    # 先检查是否有同名Agent
-    existing = db.query(CustomAgentModel).filter(CustomAgentModel.name == req.name).first()
+async def create_agent(req: CustomAgentCreate, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
+    """创建新的自定义Agent，绑定到当前用户"""
+    # 检查当前用户是否已有同名Agent
+    existing = db.query(CustomAgentModel).filter(
+        CustomAgentModel.name == req.name,
+        CustomAgentModel.user_id == current_user.id
+    ).first()
     if existing:
-        # 同名的话自动加后缀，或者让用户改名称，这里自动处理加时间戳后缀
         from datetime import datetime
         timestamp = datetime.now().strftime("%m%d%H%M")
         final_name = f"{req.name}_{timestamp}"
     else:
         final_name = req.name
     
-    # 1. 生成唯一的agent_id
     agent_id = f"custom_{final_name.replace(' ', '_').lower()}_{uuid.uuid4().hex[:6]}"
-    # 2. 存入数据库
     db_agent = CustomAgentModel(
         name=final_name,
         agent_id=agent_id,
+        user_id=current_user.id,
+        icon=req.icon or "smart_toy",
+        description=req.description or "",
         system_prompt=req.system_prompt,
         llm_adapter=req.llm_adapter,
         tools=req.tools
@@ -60,42 +74,43 @@ async def create_agent(req: CustomAgentCreate, db: Session = Depends(get_db)):
     db.add(db_agent)
     db.commit()
     db.refresh(db_agent)
-    # 3. 动态注册到我们初始化的Orchestrator实例
     orchestrator.register_custom_agent(db_agent)
-    logger.info(f"✅ 自定义Agent {db_agent.name} 创建成功")
+    logger.info(f"✅ 用户{current_user.id} 创建Agent {db_agent.name}")
     return db_agent
 
 
 @router.put("/{agent_id}", response_model=CustomAgent)
-async def update_agent(agent_id: str, req: CustomAgentCreate, db: Session = Depends(get_db)):
-    """更新已有的自定义Agent，支持修改名称、提示词、工具集"""
+async def update_agent(agent_id: str, req: CustomAgentCreate, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
+    """更新自定义Agent，仅限创建者"""
     db_agent = db.query(CustomAgentModel).filter(CustomAgentModel.agent_id == agent_id).first()
     if not db_agent:
         raise HTTPException(status_code=404, detail="Agent未找到")
-    # 更新字段
+    if db_agent.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权修改其他用户的Agent")
     db_agent.name = req.name
+    db_agent.icon = req.icon or "smart_toy"
+    db_agent.description = req.description or ""
     db_agent.system_prompt = req.system_prompt
     db_agent.llm_adapter = req.llm_adapter
     db_agent.tools = req.tools
     db.commit()
     db.refresh(db_agent)
-    # 重新注册到Orchestrator，更新配置
     orchestrator.register_custom_agent(db_agent)
-    logger.info(f"🔄 自定义Agent {db_agent.name} 已更新")
+    logger.info(f"🔄 用户{current_user.id} 更新Agent {db_agent.name}")
     return db_agent
 
 
 @router.delete("/{agent_id}")
-async def delete_agent(agent_id: str, db: Session = Depends(get_db)):
-    """删除自定义Agent，同时从Orchestrator中注销"""
+async def delete_agent(agent_id: str, db: Session = Depends(get_db), current_user: UserModel = Depends(get_current_user)):
+    """删除自定义Agent，仅限创建者"""
     db_agent = db.query(CustomAgentModel).filter(CustomAgentModel.agent_id == agent_id).first()
     if not db_agent:
         raise HTTPException(status_code=404, detail="Agent未找到")
-    # 从数据库删除
+    if db_agent.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权删除其他用户的Agent")
     db.delete(db_agent)
-    # 从Orchestrator中注销
     if agent_id in orchestrator.agents:
         del orchestrator.agents[agent_id]
     db.commit()
-    logger.info(f"🗑️ 自定义Agent {db_agent.name} 已删除")
+    logger.info(f"🗑️ 用户{current_user.id} 删除Agent {db_agent.name}")
     return {"success": True, "message": "Agent已成功删除"}

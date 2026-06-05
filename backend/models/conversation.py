@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Boolean, JSON, Integer
+from sqlalchemy import Column, String, DateTime, Boolean, JSON, Integer, ForeignKey
 from sqlalchemy.orm import relationship
 from backend.db.database import Base
 
@@ -11,6 +11,7 @@ class Conversation(Base):
     __tablename__ = 'conversations'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=True, default=None)
     title = Column(String, default="新会话", nullable=False)  # 会话标题
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -19,6 +20,7 @@ class Conversation(Base):
     is_archived = Column(Boolean, default=False)  # 是否归档
     mode = Column(String, default="single", nullable=False)  # 会话模式: single(单聊) / group(群聊)
     participants = Column(JSON, default=list)  # 群聊参与者列表，存储agent_ids
+    squad_config = Column(JSON, default=dict)  # Mission 班底配置，存储完整的 squad 和 agents 数据
 
     # 建立与 Message 的反向关系
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")

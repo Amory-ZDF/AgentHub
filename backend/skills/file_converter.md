@@ -1,8 +1,7 @@
 ---
 name: file_converter
-description: 通用文件格式转换工具组，支持PDF/MD/TXT之间的互转，所有方法都接收文件路径，返回转换后的文件路径
-supported_methods: [from_pdf, to_pdf, from_md, to_md]
-dependencies: 首次使用前需要安装依赖：pip install pymupdf markdown weasyprint beautifulsoup4
+description: 当需要文件格式转换时，调用以下的tools实现
+tags: [文件格式转换]
 ---
 # 文件格式转换工具使用说明
 ## 可用方法列表

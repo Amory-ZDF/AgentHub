@@ -7,10 +7,12 @@ import importlib
 import yaml
 from typing import List, Dict, Any, Callable
 
+
+from backend.models.task_spec import TaskSpec
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from backend.agents.base_agent import BaseAgent
 from backend.agents.custom_agent import CustomAgent
@@ -24,7 +26,7 @@ from backend.models.message import Message
 from backend.llm.llm_provider import get_llm
 from backend.workflows.base import BaseWorkflow
 
-logger = logging.getLogger(__name__)
+from backend.utils.logger import logger
 
 # 一个简单的正则表达式，用于从消息内容中匹配 @agent_id
 MENTION_REGEX = r'@(\w+)'
@@ -57,6 +59,8 @@ class Orchestrator:
         self.native_skills: Dict[str, str] = {}
         # 工具类Skill：要执行代码的函数，放utils里，原来的逻辑保留
         self.tool_skills: Dict[str, Callable] = {}
+        # 封装成LangChain Tool的工具列表，支持ReAct循环
+        self.langchain_tools: List[Any] = []
 
         # 🎯 优化后的初始化顺序：先核心，后业务
         # 1. 先注册所有核心Agent
@@ -93,16 +97,45 @@ class Orchestrator:
                 logger.error(f"加载能力类Skill {md_file.name}失败: {e}")
         logger.info(f"🎉 能力类Skill加载完成，共{len(self.native_skills)}个: {list(self.native_skills.keys())}")
 
-    def _get_available_skills_prompt(self) -> str:
-        """生成所有可用能力类Skill的清单，拼到大模型的system prompt里，用户自建的Skill自动加入，大模型自主调用"""
-        if not self.native_skills:
-            return ""
-        prompt = "\n=== 可用能力类Skill清单 ===\n你可以调用以下能力处理用户请求，调用时严格输出格式：【调用Skill: {skill_name}，输入内容: {你的输入}】\n"
-        for name, content in self.native_skills.items():
-            desc = re.search(r'description:\s*(.+)', content)
-            if desc:
-                prompt += f"- {name}: {desc.group(1)}\n"
-        return prompt
+    def get_available_skills_prompt(self) -> str:
+        """统一生成所有可用技能的自然语言描述，供planner和所有子agent使用"""
+        # 处理能力类Skill（md文件）
+        native_skills_desc = []
+        for skill_name, skill_content in self.native_skills.items():
+            try:
+                # 从md文件中提取关键信息
+                name_part = skill_content.split("## 技能名称：")
+                if len(name_part) > 1:
+                    name = name_part[1].split("##")[0].strip()
+                else:
+                    name = skill_name
+                    
+                desc_part = skill_content.split("## 功能描述")
+                if len(desc_part) > 1:
+                    desc = desc_part[1].split("##")[0].strip()
+                else:
+                    desc = "无描述"
+                    
+                usage_part = skill_content.split("## 调用格式")
+                if len(usage_part) > 1:
+                    usage = usage_part[1].strip()[:200]
+                else:
+                    usage = "SKILL_CALL: {skill_name} 参数"
+                    
+                native_skills_desc.append(f"- {name}: {desc}\n  调用格式: {usage}")
+            except Exception as e:
+                logger.warning(f"解析技能{skill_name}描述失败: {e}")
+                native_skills_desc.append(f"- {skill_name}: 技能描述解析失败")
+        
+        # 处理工具类Skill
+        tool_skills_list = ", ".join(self.tool_skills.keys())
+        
+        return f"""=== 可用工具/技能列表 ===
+你可以使用以下技能来完成任务，调用时严格按照格式输出：
+{chr(10).join(native_skills_desc)}
+
+工具类技能（可直接调用的Python函数）: {tool_skills_list}
+"""
 
     def _parse_skill_call(self, content: str) -> tuple[str, str, str] | None:
         """解析大模型的Skill调用请求，支持工具组的方法参数，任何用户自建的Skill都能自动识别"""
@@ -143,6 +176,8 @@ class Orchestrator:
         try:
             from backend.utils.rag_retrieval import rag_retrieval
             self.tool_skills["rag_retrieval"] = rag_retrieval
+            from backend.utils.web_search import web_search
+            self.tool_skills["web_search"] = web_search
         except ImportError:
             pass
         try:
@@ -167,7 +202,14 @@ class Orchestrator:
         except ImportError as e:
             logger.warning(f"加载file_converter工具失败: {e}")
             pass
-        logger.info(f"✅ 工具类Skill加载完成，共{len(self.tool_skills)}个: {list(self.tool_skills.keys())}")
+        # 将所有工具类Skill转换为LangChain Tool格式
+        from langchain.tools import tool
+        for skill_key, skill_func in self.tool_skills.items():
+            # 给每个函数加上tool装饰器，包装成LangChain Tool
+            wrapped_tool = tool(skill_func)
+            wrapped_tool.name = skill_key
+            self.langchain_tools.append(wrapped_tool)
+        logger.info(f"✅ 工具类Skill加载完成，共{len(self.tool_skills)}个，已封装为LangChain Tool: {list(self.tool_skills.keys())}")
 
     def _register_builtin_workflows(self):
         """注册所有内置的固定工作流，每个工作流带自然语言匹配关键词，让orchestrator自动识别"""
@@ -204,11 +246,14 @@ class Orchestrator:
             if score > max_score:
                 max_score = score
                 best_match = workflow_id
-        # 至少匹配到1个关键词才触发工作流
-        if max_score >= 1:
-            logger.info(f"🎯 自动匹配到工作流: {best_match}，匹配得分: {max_score}")
-            return best_match
-        return None
+        # 统一触发阈值：得分超过6才触发固定工作流，避免误匹配
+        WORKFLOW_TRIGGER_THRESHOLD = 6
+        if best_match and max_score > WORKFLOW_TRIGGER_THRESHOLD:
+            logger.info(f"🎯 自动匹配到工作流: {best_match}，匹配得分: {max_score}，超过阈值{WORKFLOW_TRIGGER_THRESHOLD}，触发工作流")
+            return best_match, max_score
+        else:
+            logger.info(f"🎯 匹配得分{max_score}未达阈值{WORKFLOW_TRIGGER_THRESHOLD}，不触发固定工作流，进入深度调度逻辑")
+            return None, 0
 
     async def get_chat_response(self, conversation_id: str, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         """
@@ -250,12 +295,15 @@ class Orchestrator:
                 logger.info(f"[VERIFY] 触发@mention路由: {mentioned_agent_id}")
                 return await self._handle_mention(mentioned_agent_id, conversation_id, messages)
 
-            # 2. 第二优先级：自动匹配固定工作流，完全不用用户输入命令
-            matched_workflow = self._auto_match_workflow(content)
-            if matched_workflow:
-                logger.info(f"[VERIFY] 工作流/技能选择：触发固定工作流 '{matched_workflow}'，跳过动态规划")
+            # 2. 第二优先级：自动匹配固定工作流，完全不用用户输入命令，统一阈值避免误匹配
+            matched_workflow, max_score = self._auto_match_workflow(content)
+            WORKFLOW_TRIGGER_THRESHOLD = 6
+            if matched_workflow and max_score > WORKFLOW_TRIGGER_THRESHOLD:
+                logger.info(f"[VERIFY] 工作流/技能选择：触发固定工作流 '{matched_workflow}'，得分{max_score}达阈值{WORKFLOW_TRIGGER_THRESHOLD}，跳过动态规划")
                 return await self._handle_workflow_command(matched_workflow, conversation_id, content, messages,
                                                            checkpointer)
+            else:
+                logger.info(f"[VERIFY] 任务判断：匹配得分{max_score}未达阈值({WORKFLOW_TRIGGER_THRESHOLD})，进入深度调度逻辑")
 
             # 3. 第三优先级：判断是否是需要动态规划的复杂任务
             is_complex_task = any(keyword in content for keyword in [
@@ -328,7 +376,13 @@ class Orchestrator:
                 historical_summary = ""
 
         available_agents = [agent_id for agent_id in self.agents.keys() if agent_id not in ["planner", "summarizer"]]
-        planner_context = {"available_agents": available_agents, "historical_summary": historical_summary}
+        # 生成统一的技能列表，传给planner
+        skills_prompt = self.get_available_skills_prompt()
+        planner_context = {
+            "available_agents": available_agents, 
+            "historical_summary": historical_summary,
+            "available_skills_prompt": skills_prompt
+        }
 
         plan_task_message = HumanMessage(content=task_content)
         agent_response: AgentResponse = await planner.process_message([plan_task_message], context=planner_context)
@@ -338,12 +392,18 @@ class Orchestrator:
 
         try:
             plan_data = json.loads(agent_response.final_answer.content)
+            if isinstance(plan_data, dict):
+                tasks_raw = plan_data.get('tasks', [])
+            else:
+                tasks_raw = plan_data
+            tasks = [TaskSpec(**t) for t in tasks_raw]
+            plan_data = {"tasks": tasks}
             # 兼容两种格式：如果是列表直接用，如果是字典取tasks字段
             tasks_list = plan_data if isinstance(plan_data, list) else plan_data.get('tasks', [])
             logger.info(f"[VERIFY] 任务拆解：Planner生成了{len(tasks_list)}个子任务")
             for i, task in enumerate(tasks_list):
                 if isinstance(task, dict):
-                    logger.info(f"[VERIFY] 子任务{i+1}: {task.get('description', '')[:50]}...，Agent: {task.get('agent_id', '')}")
+                    logger.info(f"[VERIFY] 子任务{i+1}: {getattr(task, 'description', '')[:50]}...，Agent: {getattr(task, 'agent_id', '')}")
                 else:
                     logger.info(f"[VERIFY] 子任务{i+1}: {str(task)[:50]}...")
             # 统一格式，确保后续代码能正确处理
@@ -368,7 +428,7 @@ class Orchestrator:
 
         # 🚀 并行调度准备（验证点：并行调度和失败降级）
         parallel_tasks = []
-        independent_tasks = [t for t in plan_data.get('tasks', []) if t.get('parallelizable', False)]
+        independent_tasks = [t for t in plan_data.get('tasks', []) if getattr(t, 'parallelizable', False)]
         if independent_tasks:
             logger.info(f"[VERIFY] 并行调度：发现{len(independent_tasks)}个可并行执行的独立任务")
         
@@ -415,7 +475,13 @@ class Orchestrator:
                 content=m.get("content")) for m in messages],
         )
 
-        app = workflow_info["graph"].compile(checkpointer=checkpointer)
+        # 检查graph是否已经编译过，避免重复调用compile()，兼容所有版本
+        if hasattr(workflow_info["graph"], 'compile'):
+            # 还没编译，调用compile
+            app = workflow_info["graph"].compile(checkpointer=checkpointer)
+        else:
+            # 已经是编译好的graph，直接用
+            app = workflow_info["graph"]
         config = {"configurable": {"thread_id": conversation_id}}
         try:
             final_state = await app.ainvoke(initial_state, config=config)
@@ -444,10 +510,29 @@ class Orchestrator:
         main_chat_agent = self.get_agent("tongyi")
         if main_chat_agent:
             logger.info(f"Chat API: 默认路由到主聊天 Agent: {main_chat_agent.agent_id}")
+
+            # 构建系统上下文：告知当前可用的 Agent、Skill 等信息
+            agent_list = [f"- {getattr(agent, 'name', agent_id)}" for agent_id, agent in self.agents.items()]
+            agent_context = "\n".join(agent_list) if agent_list else "暂无"
+            skills_prompt = self.get_available_skills_prompt()
+
+            context_prompt = f"""你是 AgentHub 的 Orchestrator Assistant，负责回答用户关于系统的问题。
+
+当前系统中可用的 Agent：
+{agent_context}
+
+{skills_prompt}
+
+你可以回答用户关于这些 Agent 和 Skill 的用途、能力等问题。如果你不知道某个 Agent 或 Skill 的具体细节，请如实告知用户。"""
+
+            system_message = SystemMessage(content=context_prompt)
+
             history_as_msgs = [
                 Message(conversation_id=conversation_id, agent_id=m.get("role"), content=m.get("content")) for m in
                 messages]
-            response: AgentResponse = await main_chat_agent.process_message(messages=history_as_msgs)
+            # 注入系统上下文
+            full_messages = [system_message] + history_as_msgs
+            response: AgentResponse = await main_chat_agent.process_message(messages=full_messages)
             return {"agent_id": main_chat_agent.agent_id, "content": response.final_answer.content}
 
         logger.warning("Chat API: 既没有匹配的指令，也找不到默认的主聊天 Agent。")
@@ -457,24 +542,35 @@ class Orchestrator:
         }
 
     def _build_planning_graph(self) -> StateGraph:
-        """
-        🔧 构建动态规划工作流的LangGraph图结构，处理复杂任务的规划、执行、总结全流程
-        这是_orchestrator中缺失的核心方法，负责定义动态任务的执行节点和流转逻辑
-        """
         from langgraph.graph import StateGraph, END
-        
+
         workflow = StateGraph(GraphState)
-        
-        # 添加规划工作流的所有核心节点
+
         workflow.add_node("execute_tasks", self._execute_tasks_node)
+        workflow.add_node("evaluate_results", self._evaluate_results_node)
         workflow.add_node("generate_summary", self._generate_summary_node)
-        
-        # 定义流转逻辑：执行所有任务 -> 生成最终总结 -> 结束
+
         workflow.set_entry_point("execute_tasks")
-        workflow.add_edge("execute_tasks", "generate_summary")
+        workflow.add_edge("execute_tasks", "evaluate_results")
+
+        # 条件边：根据评估结果决定下一步
+        def after_evaluation(state: GraphState) -> str:
+            # 如果 state 中有 final_summary 说明节点已决定结束
+            if state.get("final_summary"):
+                return "summarize"
+            # 否则说明需要重新执行任务（replan 后的新计划）
+            return "execute_again"
+
+        workflow.add_conditional_edges(
+            "evaluate_results",
+            after_evaluation,
+            {
+                "summarize": "generate_summary",
+                "execute_again": "execute_tasks"
+            }
+        )
         workflow.add_edge("generate_summary", END)
-        
-        logger.info("✅ 动态规划工作流蓝图构建完成")
+
         return workflow
         
     async def _execute_tasks_node(self, state: GraphState) -> Dict[str, Any]:
@@ -494,7 +590,7 @@ class Orchestrator:
         parallel_tasks = []
         sequential_tasks = []
         for task in tasks:
-            deps = task.get("dependencies", [])
+            deps = getattr(task, "dependencies", [])
             if not deps:  # 没有依赖的任务可以并行执行
                 parallel_tasks.append(task)
             else:
@@ -506,22 +602,22 @@ class Orchestrator:
         if parallel_tasks:
             def run_sync_task(task):
                 """在线程池中运行异步任务，实现真正的并发执行"""
-                agent_id = task.get("agent_id")
-                prompt = task.get("prompt", task.get("description", ""))
+                agent_id = getattr(task, "agent_id")
+                prompt = getattr(task, "prompt", getattr(task, "description", ""))
                 agent = self.get_agent(agent_id)
                 if not agent:
-                    return {"step_id": task["step_id"], "result": f"错误：找不到Agent {agent_id}"}
+                    return {"step_id": task.step_id, "result": f"错误：找不到Agent {agent_id}"}
                 try:
                     from backend.models.message import Message
                     msg = Message(conversation_id=state.get("conversation_id"), agent_id="user", content=prompt)
                     # 使用asyncio.run处理异步方法，在线程池中独立执行
                     import asyncio
                     resp = asyncio.run(agent.process_message([msg]))
-                    logger.info(f"✅ 子任务{task['step_id']}执行成功，Agent: {agent_id}")
-                    return {"step_id": task["step_id"], "result": resp.final_answer.content}
+                    logger.info(f"✅ 子任务{task.step_id}执行成功，Agent: {agent_id}")
+                    return {"step_id": task.step_id, "result": resp.final_answer.content}
                 except Exception as e:
-                    logger.error(f"❌ 子任务{task['step_id']}执行失败: {e}")
-                    return {"step_id": task["step_id"], "result": f"执行失败: {str(e)}"}
+                    logger.error(f"❌ 子任务{task.step_id}执行失败: {e}")
+                    return {"step_id": task.step_id, "result": f"执行失败: {str(e)}"}
             
             # 使用ThreadPoolExecutor并发执行所有独立任务，支持多任务同时运行
             from concurrent.futures import ThreadPoolExecutor
@@ -532,14 +628,20 @@ class Orchestrator:
                 
             for r in parallel_results:
                 step_results[r["step_id"]] = r["result"]
+                # 🔧 黑板机制：将当前任务结果写入shared_workspace
+                task_info = next((t for t in parallel_tasks if t.step_id == r["step_id"]), None)
+                if task_info:
+                    current_workspace = state.get("shared_workspace", {})
+                    current_workspace[f"task_{r['step_id']}_output"] = r["result"]
+                    state["shared_workspace"] = current_workspace
                 # 子任务完成后实时保存到数据库，前端轮询就能看到
                 conv_id = state.get("conversation_id")
                 if conv_id and self.db_session:
                     from backend.services.conversation_service import ConversationService
                     conv_service = ConversationService(self.db_session)
                     # 从任务里获取agent_id，找不到就用默认的
-                    task_info = next((t for t in parallel_tasks if t["step_id"] == r["step_id"]), None)
-                    agent_id = task_info.get("agent_id", "qwen-long") if task_info else "qwen-long"
+                    task_info = next((t for t in parallel_tasks if t.step_id == r["step_id"]), None)
+                    agent_id = getattr(task_info, "agent_id", "qwen-long") if task_info else "qwen-long"
                     # 保存消息到数据库
                     conv_service.add_message_to_conversation(
                         conversation_id=int(conv_id),
@@ -551,16 +653,73 @@ class Orchestrator:
                 
         # 再执行顺序任务（简化处理，真实场景可做拓扑排序）
         for task in sequential_tasks:
-            agent_id = task.get("agent_id")
-            prompt = task.get("prompt", task.get("description", ""))
+            agent_id = getattr(task, "agent_id")
+            prompt = getattr(task, "prompt", getattr(task, "description", ""))
             agent = self.get_agent(agent_id)
             if agent:
                 try:
+                    # 🔧 黑板机制：从shared_workspace注入上下文到prompt
+                    workspace = state.get("shared_workspace", {})
+                    workspace_context = "\n=== 之前任务的关键发现（黑板上下文） ===\n"
+                    if workspace:
+                        for key, value in workspace.items():
+                            # 只取前300字，避免prompt过长
+                            workspace_context += f"- {key}: {str(value)[:300]}...\n"
+                    else:
+                        workspace_context += "暂无前置任务的共享上下文\n"
+                    
+                    # 合并上下文和当前任务prompt
+                    full_prompt = f"{workspace_context}\n=== 当前任务 ===\n{prompt}"
+                    
                     from backend.models.message import Message
-                    msg = Message(conversation_id=state.get("conversation_id"), agent_id="user", content=prompt)
-                    resp = await agent.process_message([msg])
-                    step_results[task["step_id"]] = resp.final_answer.content
-                    logger.info(f"✅ 顺序子任务{task['step_id']}执行成功，Agent: {agent_id}")
+                    # 🔧 黑板机制：从shared_workspace注入上下文到prompt
+                    workspace = state.get("shared_workspace", {})
+                    workspace_context = "\n=== 之前任务的关键发现（黑板上下文） ===\n"
+                    if workspace:
+                        for key, value in workspace.items():
+                            # 只取前300字，避免prompt过长
+                            workspace_context += f"- {key}: {str(value)[:300]}...\n"
+                    else:
+                        workspace_context += "暂无前置任务的共享上下文\n"
+                    
+                    # 合并技能列表、黑板上下文和当前任务prompt
+                    skills_prompt = self.get_available_skills_prompt()
+                    full_prompt = f"{skills_prompt}\n{workspace_context}\n=== 当前任务 ===\n{prompt}"
+                    
+                    from backend.models.message import Message
+                    # 优先使用ReAct执行器调用，支持工具调用
+                    if hasattr(agent, 'executor'):
+                        logger.info(f"🚀 调用Agent {task.agent_id} 的ReAct执行器，支持工具调用")
+                        raw_resp = await agent.executor.ainvoke({"input": full_prompt})
+                        # 统一返回格式，处理各种可能的返回值
+                        output_text = raw_resp.get('output', str(raw_resp)) if isinstance(raw_resp, dict) else str(raw_resp)
+                        class MockResp:
+                            def __init__(self, content):
+                                self.final_answer = type('obj', (object,), {'content': content})
+                        resp = MockResp(output_text)
+                    else:
+                        # 降级为普通调用，确保统一处理所有返回格式
+                        msg = Message(conversation_id=state.get("conversation_id"), agent_id="user", content=full_prompt)
+                        raw_resp = await agent.process_message([msg])
+                        # 统一包装返回格式，兼容字符串、对象等多种返回类型
+                        if isinstance(raw_resp, str):
+                            output_text = raw_resp
+                        elif hasattr(raw_resp, 'final_answer') and hasattr(raw_resp.final_answer, 'content'):
+                            output_text = raw_resp.final_answer.content
+                        elif hasattr(raw_resp, 'content'):
+                            output_text = raw_resp.content
+                        else:
+                            output_text = str(raw_resp)
+                        class MockResp:
+                            def __init__(self, content):
+                                self.final_answer = type('obj', (object,), {'content': content})
+                        resp = MockResp(output_text)
+                    step_results[task.step_id] = resp.final_answer.content
+                    # 🔧 黑板机制：将当前任务结果写入shared_workspace
+                    current_workspace = state.get("shared_workspace", {})
+                    current_workspace[f"task_{task.step_id}_output"] = resp.final_answer.content
+                    state["shared_workspace"] = current_workspace
+                    logger.info(f"✅ 顺序子任务{task.step_id}执行成功，Agent: {agent_id}")
                     # 顺序子任务完成后也实时保存到数据库
                     conv_id = state.get("conversation_id")
                     if conv_id and self.db_session:
@@ -568,15 +727,15 @@ class Orchestrator:
                         conv_service = ConversationService(self.db_session)
                         conv_service.add_message_to_conversation(
                             conversation_id=int(conv_id),
-                            agent_id=task.get("agent_id", "agent"),
-                            content=f"📝 顺序任务{task['step_id']}完成：\n{resp.final_answer.content}"
+                            agent_id=getattr(task, "agent_id", "agent"),
+                            content=f"📝 顺序任务{task.step_id}完成：\n{resp.final_answer.content}"
                         )
-                        logger.info(f"💾 顺序子任务{task['step_id']}的消息已写入数据库，Agent: {task.get('agent_id', 'agent')}")
-                    logger.info(f"📤 顺序子任务{task['step_id']}完成，结果：{resp.final_answer.content[:100]}...")
+                        logger.info(f"💾 顺序子任务{task.step_id}的消息已写入数据库，Agent: {getattr(task, 'agent_id', 'agent')}")
+                    logger.info(f"📤 顺序子任务{task.step_id}完成，结果：{resp.final_answer.content[:100]}...")
                 except Exception as e:
-                    step_results[task["step_id"]] = f"执行失败: {str(e)}"
-                    logger.error(f"❌ 顺序子任务{task['step_id']}执行失败: {e}")
-                    
+                    step_results[task.step_id] = f"执行失败: {str(e)}"
+                    logger.error(f"❌ 顺序子任务{task.step_id}执行失败: {e}")
+
         logger.info(f"🎉 所有子任务执行完成，共{len(step_results)}个结果")
         return {**state, "step_results": step_results}
         
@@ -658,7 +817,7 @@ class Orchestrator:
         
         # 2. 如果有计划数据，标记哪些临时子任务结果可以遗忘
         if plan_data:
-            debug_tasks = [t for t in plan_data.get('tasks', []) if 'debug' in t.get('description', '').lower()]
+            debug_tasks = [t for t in plan_data.get('tasks', []) if 'debug' in getattr(t, 'description', '').lower()]
             if debug_tasks:
                 logger.info(f"[MEMORY] 选择性遗忘：发现{len(debug_tasks)}个调试类子任务，相关临时结果已清理")
 
@@ -697,13 +856,15 @@ class Orchestrator:
 
                     # 2. 创建并注册 CustomAgent，将适配器实例注入
                     system_prompt = config.get("system_prompt", "你是一个乐于助人的AI助手。")
+                    agent_name = config.get("name", agent_id)
                     custom_agent = CustomAgent(
                         agent_id=agent_id,
                         system_prompt=system_prompt,
-                        llm_adapter=adapter_instance
+                        llm_adapter=adapter_instance,
+                        name=agent_name
                     )
                     self.register_agent(custom_agent)
-                    logger.info(f"成功加载并注册自定义 Agent: '{agent_id}' (由 {adapter_id} 驱动)")
+                    logger.info(f"成功加载并注册自定义 Agent: '{agent_name}' ({agent_id}) (由 {adapter_id} 驱动)")
 
                 except Exception as e:
                     logger.error(f"加载自定义 Agent '{agent_id}' 时出错: {e}", exc_info=True)
@@ -765,10 +926,63 @@ class Orchestrator:
                     logger.error(f"加载工作流插件 '{module_name}' 失败: {e}", exc_info=True)
 
     def register_agent(self, agent: BaseAgent):
-        if agent.agent_id in self.agents:
-            logger.warning(f"Agent '{agent.agent_id}' 已被注册，将被覆盖。")
-        self.agents[agent.agent_id] = agent
-        logger.info(f"Agent '{agent.agent_id}' 已注册。")
+        """注册Agent到Orchestrator，自动绑定所有工具，支持ReAct循环"""
+        # 兼容不同版本的LangChain，处理import路径问题
+        try:
+            from langchain.agents import AgentExecutor, create_react_agent
+        except ImportError:
+            try:
+                # 新版LangChain的导入路径
+                from langchain.agents.react.agent import create_react_agent
+                from langchain.agents.agent_executor import AgentExecutor
+            except ImportError:
+                logger.warning("⚠️ 未找到LangChain的ReAct相关模块，将跳过ReAct支持，请安装langchain>=0.1.0: pip install langchain langchain-core")
+                if agent.agent_id in self.agents:
+                    logger.warning(f"Agent '{agent.agent_id}' 已被注册，将被覆盖。")
+                self.agents[agent.agent_id] = agent
+                logger.info(f"✅ Agent '{agent.agent_id}' 已注册（无ReAct支持）。")
+                return
+        from langchain_core.prompts import ChatPromptTemplate
+        
+        # 给agent创建ReAct执行器，绑定所有langchain_tools
+        if hasattr(agent, 'llm') and self.langchain_tools:
+            try:
+                # ReAct标准prompt模板
+                react_prompt = ChatPromptTemplate.from_template("""回答以下问题，你可以使用以下工具：
+{tools}
+
+请按照以下格式输出：
+Thought: 你现在的思考，描述你需要做什么
+Action: 要调用的工具名称
+Action Input: 工具的输入参数
+Observation: 工具返回的结果
+...（重复思考/行动/观察，直到你有答案）
+Final Answer: 最终的答案
+
+问题：{input}
+{agent_scratchpad}""")
+                react_agent = create_react_agent(agent.llm, self.langchain_tools, react_prompt)
+                agent_executor = AgentExecutor(
+                    agent=react_agent, 
+                    tools=self.langchain_tools, 
+                    verbose=True,
+                    handle_parsing_errors=True
+                )
+                # 为agent附加执行器
+                agent.executor = agent_executor
+                self.agents[agent.agent_id] = agent
+                logger.info(f"✅ Agent '{agent.agent_id}' 已注册，绑定了{len(self.langchain_tools)}个工具，支持ReAct循环。")
+            except Exception as e:
+                logger.warning(f"创建Agent {agent.agent_id}的ReAct执行器失败，降级为普通注册: {e}")
+                if agent.agent_id in self.agents:
+                    logger.warning(f"Agent '{agent.agent_id}' 已被注册，将被覆盖。")
+                self.agents[agent.agent_id] = agent
+                logger.info(f"Agent '{agent.agent_id}' 已注册。")
+        else:
+            if agent.agent_id in self.agents:
+                logger.warning(f"Agent '{agent.agent_id}' 已被注册，将被覆盖。")
+            self.agents[agent.agent_id] = agent
+            logger.info(f"Agent '{agent.agent_id}' 已注册。")
 
     def register_custom_agent(self, db_agent):
         """注册用户通过表单创建的自定义Agent，和从yaml加载的逻辑完全一致"""
@@ -780,12 +994,13 @@ class Orchestrator:
             agent_id=f"{db_agent.agent_id}_adapter",
             config={}
         )
-        # 创建CustomAgent并注册
+        # 创建CustomAgent并注册（传入显示名称，@ 查找时按名称匹配）
         from backend.agents.custom_agent import CustomAgent
         new_agent = CustomAgent(
             agent_id=db_agent.agent_id,
             system_prompt=db_agent.system_prompt,
-            llm_adapter=adapter_instance
+            llm_adapter=adapter_instance,
+            name=db_agent.name
         )
         self.register_agent(new_agent)
         logger.info(f"✅ 成功注册自定义Agent: {db_agent.name} ({db_agent.agent_id})")
@@ -813,10 +1028,24 @@ class Orchestrator:
         return self.agents.get(agent_id)
 
     def _find_mentioned_agent_id(self, content: str) -> str | None:
+        """
+        从消息内容中提取 @mention 并返回对应的 agent_id。
+        查找优先级：
+          1. 直接匹配 agent_id（如 @tongyi）
+          2. 按显示名称匹配（如 @python专家，查找所有 Agent 的 .name 属性）
+        """
         match = re.search(MENTION_REGEX, content)
         if match:
-            return match.group(1)
-        return None
+            mentioned = match.group(1).strip()
+            # 1) 先尝试作为 agent_id 直接查找
+            if mentioned in self.agents:
+                return mentioned
+            # 2) 按显示名称查找
+            for agent_id, agent in self.agents.items():
+                agent_name = getattr(agent, 'name', None)
+                if agent_name and agent_name == mentioned:
+                    return agent_id
+            # 3) 找不到就原样返回，_handle_mention     if agent_name and agent_name == mentioned:\n                    return agent_id\n            # 3) 找不到就原样返回，_handle_mention 会给出"未找到"提示\n            return mentioned\n        return None"}]
 
     async def create_conversation(self, first_message: str = None) -> str:
         """创建新对话，支持根据用户第一条消息自动生成标题，调用gen_chat_title能力类Skill"""
@@ -833,3 +1062,117 @@ class Orchestrator:
                 title = f"对话_{datetime.now().strftime('%m%d%H%M')}"
         logger.info(f"✅ 创建新对话: {conversation_id}，标题: {title}")
         return conversation_id
+
+    async def _evaluate_results_node(self, state: GraphState) -> Dict[str, Any]:
+        """评估所有子任务的结果，判断是否需要重规划"""
+        logger.info("--- [PlanningWorkflow] 评估子任务结果 ---")
+        tasks = state.get("plan_data", {}).get("tasks", [])
+        step_results = state.get("step_results", {})
+        workspace = state.get("shared_workspace", {})
+        task_content = state.get("task_content", "")
+
+        if not tasks:
+            return {**state, "final_summary": "无任务可评估"}
+
+        # 构造评估 prompt
+        tasks_summary = []
+        for task in tasks:
+            res = step_results.get(task.step_id, "")
+            if isinstance(res, dict):
+                status = res.get('status', '未知')
+                result = res.get('result', '')[:200]
+            else:
+                status = '完成'
+                result = str(res)[:200]
+            tasks_summary.append(
+                f"步骤{task.step_id} ({task.agent_id}): 状态={status}, "
+                f"结果摘要={result}"
+            )
+
+        prompt = f"""原始任务：{task_content}
+
+    已完成子任务状况：
+    {chr(10).join(tasks_summary)}
+
+    当前黑板共享信息：{json.dumps(workspace, ensure_ascii=False)}
+
+    请判断：
+    1. 是否所有子任务都已成功？如果未全部成功，是否有可以补救的步骤？
+    2. 是否需要重新规划剩余任务？如果需要，请给出新的子任务列表（JSON数组，格式同前）。
+    3. 如果任务已全部完成且满足要求，返回 "complete"。
+
+    请以JSON格式返回：
+    {{
+      "decision": "continue" | "replan" | "complete",
+      "new_tasks": [ ... ]  // 仅当 decision=replan 时提供
+    }}
+    """
+        # 调用 LLM
+        messages = [{"role": "user", "content": prompt}]
+        resp = await self.llm.invoke(messages)
+        if isinstance(resp, str):
+            content = resp
+        else:
+            content = resp.content.strip()
+
+        # 解析决策（增强：用正则提取JSON，和planner保持一致）
+        try:
+            # 使用正则表达式精确查找 JSON 代码块
+            match = re.search(r"```json\n(.*?)\n```", content, re.DOTALL)
+            if not match:
+                logger.warning("[PlanningWorkflow] 响应中未找到```json代码块，尝试直接解析")
+                json_str = content.strip()
+            else:
+                logger.info("[PlanningWorkflow] 在评估响应中成功匹配到JSON代码块")
+                json_str = match.group(1).strip()
+            
+            decision = json.loads(json_str)
+            logger.info(f"[PlanningWorkflow] 评估节点解析成功，决策: {decision.get('decision', 'unknown')}")
+        except json.JSONDecodeError as e:
+            # 降级：如果解析失败，认为完成
+            logger.error(f"[PlanningWorkflow] 评估节点JSON解析失败: {e}，原始内容: {content[:500]}")
+            return {**state, "final_summary": "任务执行完成（评估降级）"}
+
+        if decision.get("decision") == "complete":
+            return {**state, "final_summary": "所有任务完成"}
+        elif decision.get("decision") == "replan":
+            new_tasks_raw = decision.get("new_tasks", [])
+            # 处理LLM返回的不规则字段，映射为TaskSpec要求的格式
+            normalized_tasks = []
+            for t in new_tasks_raw:
+                normalized = t.copy()
+                # 字段映射：role → agent_id
+                if 'role' in normalized and 'agent_id' not in normalized:
+                    normalized['agent_id'] = normalized.pop('role')
+                # 如果缺少prompt，用description或其他字段补全
+                if 'prompt' not in normalized:
+                    normalized['prompt'] = normalized.get('description', '执行修复任务')
+                # dependencies字段兼容（depends_on → dependencies）
+                if 'depends_on' in normalized and 'dependencies' not in normalized:
+                    normalized['dependencies'] = normalized.pop('depends_on', [])
+                normalized_tasks.append(normalized)
+            
+            new_tasks = [TaskSpec(**t) for t in normalized_tasks]
+            # 增加规划次数
+            iteration = state.get("plan_iteration", 0) + 1
+            if iteration > 2:  # 最多重规划两次，避免死循环
+                logger.warning("重规划次数过多，强制结束")
+                return {**state, "final_summary": "任务过于复杂，部分结果请参考历史。"}
+            # 保留已成功的步骤结果，清空失败步骤结果
+            # 过滤成功的任务，兼容字符串类型的结果
+            new_step_results = {}
+            for k, v in step_results.items():
+                if isinstance(v, dict) and v.get("status") == "success":
+                    new_step_results[k] = v
+                elif isinstance(v, str):
+                    # 字符串类型的结果也视为成功
+                    new_step_results[k] = v
+            return {
+                **state,
+                "plan_data": {"tasks": new_tasks},
+                "step_results": new_step_results,
+                "plan_iteration": iteration
+            }
+        else:  # continue 或其他
+            # 可能部分任务未成功但可继续，这里不做重规划，直接总结
+            return {**state, "final_summary": "部分任务未完成，请检查结果"}

@@ -14,4 +14,9 @@ class CodeAnalyzerAgent:
         logger.info("[CodeAnalyzerAgent] 已构建分析提示词，调用LLM进行分析")
         response = await llm.invoke(prompt)
         logger.info("✅ [CodeAnalyzerAgent] 代码分析完成，结果已生成")
-        return {**state, "code_analysis": response.content.strip()}
+        # 兼容两种返回格式：字符串直接用，对象取.content
+        if isinstance(response, str):
+            content = response.strip()
+        else:
+            content = response.content.strip()
+        return {**state, "code_analysis": content}

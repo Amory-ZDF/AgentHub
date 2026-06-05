@@ -362,6 +362,171 @@ app.delete('/api/skills/:id', auth, (req, res) => {
   res.json({ ok: true });
 });
 
+/* --------------------------------------------------------------- agents API */
+
+function publicAgent(row, currentUserId) {
+  if (!row) return null;
+  let skills = [];
+  try { skills = JSON.parse(row.skills || '[]'); } catch (_) {}
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    icon: row.icon,
+    description: row.description,
+    model: row.model,
+    systemPrompt: row.system_prompt,
+    skills,
+    authorId: row.author_id,
+    authorName: row.author_name,
+    isPublic: !!row.is_public,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    isMine: currentUserId != null && row.author_id === currentUserId,
+  };
+}
+
+// GET /api/agents/market — 公开Agent列表
+app.get('/api/agents/market', (req, res) => {
+  const u = tryAuth(req);
+  const rows = db.prepare(`
+    SELECT * FROM agents WHERE is_public = 1
+    ORDER BY id DESC
+  `).all();
+  res.json({
+    ok: true,
+    agents: rows.map(r => publicAgent(r, u && u.id))
+  });
+});
+
+// GET /api/agents/mine — 我创建的Agent
+app.get('/api/agents/mine', auth, (req, res) => {
+  const uid = req.userPayload.id;
+  const rows = db.prepare('SELECT * FROM agents WHERE author_id = ? ORDER BY updated_at DESC').all(uid);
+  res.json({
+    ok: true,
+    agents: rows.map(r => publicAgent(r, uid))
+  });
+});
+
+// POST /api/agents — 创建Agent
+app.post('/api/agents', auth, (req, res) => {
+  const uid = req.userPayload.id;
+  const { slug, name, icon, description, model, system_prompt, skills, is_public } = req.body || {};
+  if (!slug || !SLUG_RE.test(slug)) return res.status(400).json({ ok: false, error: 'invalid_slug' });
+  const exists = db.prepare('SELECT id FROM agents WHERE slug = ?').get(slug);
+  if (exists) return res.status(409).json({ ok: false, error: 'slug_taken' });
+  
+  const author = db.prepare('SELECT username FROM users WHERE id = ?').get(uid);
+  const info = db.prepare(`
+    INSERT INTO agents (slug, name, icon, description, model, system_prompt, skills, author_id, author_name, is_public)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(slug, name || '新Agent', icon || 'bot', description || '', model || 'qwen-plus', system_prompt || '', JSON.stringify(skills || []), uid, author.username, is_public ? 1 : 0);
+  const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(info.lastInsertRowid);
+  res.json({ ok: true, agent: publicAgent(row, uid) });
+});
+
+// PUT /api/agents/:id — 编辑Agent（仅作者）
+app.put('/api/agents/:id', auth, (req, res) => {
+  const id = +req.params.id;
+  const uid = req.userPayload.id;
+  const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+  if (row.author_id !== uid) return res.status(403).json({ ok: false, error: 'forbidden' });
+  
+  const { name, icon, description, model, system_prompt, skills, is_public } = req.body || {};
+  db.prepare(`
+    UPDATE agents SET name=?, icon=?, description=?, model=?, system_prompt=?, skills=?, is_public=?, updated_at=datetime('now')
+    WHERE id=?
+  `).run(name || row.name, icon || row.icon, description ?? row.description, model || row.model, system_prompt ?? row.system_prompt, skills ? JSON.stringify(skills) : row.skills, is_public != null ? (is_public ? 1 : 0) : row.is_public, id);
+  const updated = db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  res.json({ ok: true, agent: publicAgent(updated, uid) });
+});
+
+// DELETE /api/agents/:id — 删除Agent（仅作者）
+app.delete('/api/agents/:id', auth, (req, res) => {
+  const id = +req.params.id;
+  const uid = req.userPayload.id;
+  const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+  if (row.author_id !== uid) return res.status(403).json({ ok: false, error: 'forbidden' });
+  db.prepare('DELETE FROM agents WHERE id = ?').run(id);
+  // 同步删除该Agent下的所有对话
+  db.prepare('DELETE FROM conversations WHERE agent_id = ?').run(id);
+  res.json({ ok: true });
+});
+
+/* ---------------------------------------------------------- conversations API */
+
+function publicConversation(row) {
+  if (!row) return null;
+  let messages = [];
+  try { messages = JSON.parse(row.messages || '[]'); } catch (_) {}
+  return {
+    id: row.id,
+    title: row.title,
+    agentId: row.agent_id,
+    messages,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// GET /api/conversations/mine — 我的所有对话列表
+app.get('/api/conversations/mine', auth, (req, res) => {
+  const uid = req.userPayload.id;
+  const rows = db.prepare('SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC').all(uid);
+  res.json({
+    ok: true,
+    conversations: rows.map(r => publicConversation(r))
+  });
+});
+
+// GET /api/conversations/:id — 单条对话详情
+app.get('/api/conversations/:id', auth, (req, res) => {
+  const id = +req.params.id;
+  const uid = req.userPayload.id;
+  const row = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(id, uid);
+  if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+  res.json({ ok: true, conversation: publicConversation(row) });
+});
+
+// POST /api/conversations — 创建新对话
+app.post('/api/conversations', auth, (req, res) => {
+  const uid = req.userPayload.id;
+  const { title, agent_id, messages } = req.body || {};
+  const info = db.prepare(`
+    INSERT INTO conversations (title, user_id, agent_id, messages) VALUES (?, ?, ?, ?)
+  `).run(title || '新对话', uid, agent_id || null, JSON.stringify(messages || []));
+  const row = db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
+  res.json({ ok: true, conversation: publicConversation(row) });
+});
+
+// PUT /api/conversations/:id — 更新对话（改标题/更新消息）
+app.put('/api/conversations/:id', auth, (req, res) => {
+  const id = +req.params.id;
+  const uid = req.userPayload.id;
+  const row = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(id, uid);
+  if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+  
+  const { title, messages } = req.body || {};
+  db.prepare(`
+    UPDATE conversations SET title=?, messages=?, updated_at=datetime('now') WHERE id=?
+  `).run(title ?? row.title, messages ? JSON.stringify(messages) : row.messages, id);
+  const updated = db.prepare('SELECT * FROM conversations WHERE id = ?').get(id);
+  res.json({ ok: true, conversation: publicConversation(updated) });
+});
+
+// DELETE /api/conversations/:id — 删除对话
+app.delete('/api/conversations/:id', auth, (req, res) => {
+  const id = +req.params.id;
+  const uid = req.userPayload.id;
+  const row = db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?').get(id, uid);
+  if (!row) return res.status(404).json({ ok: false, error: 'not_found' });
+  db.prepare('DELETE FROM conversations WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
 /* ---------------------------------------------------------- static frontend */
 
 // 把 /Users/.../AgentHub-my flicker 目录直接对外提供 → 同域访问 index.html

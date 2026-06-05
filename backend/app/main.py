@@ -18,6 +18,7 @@ from backend.models.conversation import Conversation
 from backend.models.message import Message
 from backend.models.user import User
 from backend.models.skill import Skill, SkillInstall
+from backend.models.custom_agent import CustomAgent
 
 
 @asynccontextmanager
@@ -28,6 +29,72 @@ async def lifespan(app: FastAPI):
     # 在测试环境中，表的创建由 conftest.py 负责。
     # 因此，在应用生命周期中自动创建表是不推荐的做法。
     Base.metadata.create_all(bind=engine)
+    # 检查并修复缺失的列（SQLite 的 create_all 不会给已有表加新列）
+    try:
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        columns = [c['name'] for c in inspector.get_columns('conversations')]
+        if 'squad_config' not in columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE conversations ADD COLUMN squad_config JSON DEFAULT '{}'"))
+                conn.commit()
+                logger.info("✅ 已添加缺失列: conversations.squad_config")
+        # 检查 custom_agents 表是否有 icon 和 description 列
+        ca_columns = [c['name'] for c in inspector.get_columns('custom_agents')]
+        if 'icon' not in ca_columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE custom_agents ADD COLUMN icon VARCHAR DEFAULT 'smart_toy'"))
+                conn.commit()
+                logger.info("✅ 已添加缺失列: custom_agents.icon")
+        if 'description' not in ca_columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE custom_agents ADD COLUMN description VARCHAR DEFAULT ''"))
+                conn.commit()
+                logger.info("✅ 已添加缺失列: custom_agents.description")
+        # 检查 custom_agents 表是否有 user_id 列
+        if 'user_id' not in ca_columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE custom_agents ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+                conn.commit()
+                logger.info("✅ 已添加缺失列: custom_agents.user_id")
+        # 检查 conversations 表是否有 user_id 列
+        conv_columns = [c['name'] for c in inspector.get_columns('conversations')]
+        if 'user_id' not in conv_columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE conversations ADD COLUMN user_id INTEGER REFERENCES users(id)"))
+                conn.commit()
+                logger.info("✅ 已添加缺失列: conversations.user_id")
+    except Exception as e:
+        logger.warning(f"⚠️ 检查/修复数据库列时出错: {e}")
+    # 迁移无主的 agents/missions 到第一个用户（兼容旧数据）
+    try:
+        from backend.db.database import SessionLocal
+        db_migrate = SessionLocal()
+        first_user = db_migrate.query(User).order_by(User.id).first()
+        if first_user:
+            orphan_agents = db_migrate.query(CustomAgent).filter(CustomAgent.user_id == None).all()
+            for agent in orphan_agents:
+                agent.user_id = first_user.id
+                logger.info(f"🔄 迁移无主Agent '{agent.name}' 到用户 {first_user.username}")
+            orphan_convs = db_migrate.query(Conversation).filter(Conversation.user_id == None).all()
+            for conv in orphan_convs:
+                conv.user_id = first_user.id
+                logger.info(f"🔄 迁移无主Mission '{conv.title}' 到用户 {first_user.username}")
+            if orphan_agents or orphan_convs:
+                db_migrate.commit()
+                logger.info(f"✅ 无主数据迁移完成: {len(orphan_agents)} 个Agent, {len(orphan_convs)} 个Mission")
+        db_migrate.close()
+    except Exception as e:
+        logger.warning(f"⚠️ 迁移无主数据时出错: {e}")
+    # 将 skills/*.md 原生技能写入数据库（种子数据）
+    try:
+        from backend.db.database import SessionLocal
+        from backend.app.api.skills import seed_native_skills_to_db
+        db = SessionLocal()
+        seed_native_skills_to_db(db)
+        db.close()
+    except Exception as e:
+        logger.warning(f"⚠️ 写入技能种子数据时出错: {e}")
     logger.info("✅ 数据库表已创建，应用已就绪")
 
     yield
@@ -49,7 +116,7 @@ def create_app() -> FastAPI:
     # CORS 中间件
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=["http://localhost:7065", "http://localhost:3030", "http://localhost:8000", "*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -58,11 +125,12 @@ def create_app() -> FastAPI:
     # 导入路由
     from backend.app.api import conversations, messages, agents, chat, auth, skills
 
-    app.include_router(conversations.router, prefix="/api/conversations", tags=["Conversations"])
+    app.include_router(conversations.router, prefix="/api/missions", tags=["Missions"])
     app.include_router(messages.router, prefix="/api", tags=["Messages"])
     app.include_router(agents.router, prefix="/api/agents", tags=["Agents"])
     app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
-    app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
+    # 移除auth和skills的前缀，让接口路径与前端一致
+    app.include_router(auth.router, prefix="/api", tags=["Authentication"])
     app.include_router(skills.router, prefix="/api/skills", tags=["Skills"])
     
     # 添加健康检查端点以匹配组员的前端
@@ -73,7 +141,14 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok"}
-
+    
+    # 调试：打印所有注册的路由
+    print("\n=== 所有注册的路由 ===")
+    for route in app.routes:
+        if hasattr(route, 'path'):
+            print(f"{route.path} -> {route.name}")
+    print("======================\n")
+    
     return app
 
 app = create_app()

@@ -55,19 +55,42 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     )
     try:
         token = credentials.credentials
+        logger.info(f"[AUTH] get_current_user: token开头={str(token)[:20]}...")
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: int = payload.get("sub")
+        user_id = int(payload.get("sub"))
+        logger.info(f"[AUTH] jwt解码成功, sub(用户ID)={user_id}")
         if user_id is None:
+            logger.warning("[AUTH] token中sub为空")
             raise credentials_exception
-    except JWTError:
+    except JWTError as e:
+        logger.warning(f"[AUTH] jwt解码失败: {e}")
         raise credentials_exception
     user = db.query(UserModel).filter(UserModel.id == user_id).first()
     if user is None:
+        logger.warning(f"[AUTH] 数据库中未找到用户ID={user_id}")
         raise credentials_exception
+    logger.info(f"[AUTH] 认证成功: user={user.username} id={user.id}")
     return user
 
+
+async def try_get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)), db: Session = Depends(get_db)):
+    """尝试获取当前用户，未登录返回None（不抛401）"""
+    if not credentials:
+        return None
+    try:
+        token = credentials.credentials
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = int(payload.get("sub"))
+        if user_id is None:
+            return None
+        user = db.query(UserModel).filter(UserModel.id == user_id).first()
+        return user
+    except:
+        return None
+
+
 # API端点
-@router.post("/register", response_model=Token)
+@router.post("/register")
 async def register(user_in: UserCreate, db: Session = Depends(get_db)):
     """用户注册"""
     # 检查用户名是否已存在
@@ -94,22 +117,32 @@ async def register(user_in: UserCreate, db: Session = Depends(get_db)):
     # 生成访问令牌
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": db_user.id},
+        data={"sub": str(db_user.id)},
         expires_delta=access_token_expires
     )
     
     logger.info(f"✅ 新用户注册成功: {db_user.username}")
-    return {"access_token": access_token, "token_type": "bearer"}
+    # 返回格式匹配前端期望
+    return {
+        "ok": True,
+        "user": {
+            "id": db_user.id,
+            "username": db_user.username,
+            "email": db_user.email,
+            "createdAt": db_user.created_at
+        },
+        "token": access_token
+    }
 
-@router.post("/login", response_model=Token)
+@router.post("/login")
 async def login(user_in: UserLogin, db: Session = Depends(get_db)):
-    """用户登录"""
-    # 查找用户
-    user = db.query(UserModel).filter(UserModel.username == user_in.username).first()
+    """用户登录 - 使用 email + password"""
+    # 按 email 查找用户（前端传的是 email）
+    user = db.query(UserModel).filter(UserModel.email == user_in.email).first()
     if not user or not verify_password(user_in.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户名或密码错误",
+            detail="邮箱或密码错误",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
@@ -119,14 +152,32 @@ async def login(user_in: UserLogin, db: Session = Depends(get_db)):
     # 生成访问令牌
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.id},
+        data={"sub": str(user.id)},
         expires_delta=access_token_expires
     )
     
     logger.info(f"✅ 用户登录成功: {user.username}")
-    return {"access_token": access_token, "token_type": "bearer"}
+    # 返回格式匹配前端期望
+    return {
+        "ok": True,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "createdAt": user.created_at
+        },
+        "token": access_token
+    }
 
-@router.get("/me", response_model=UserResponse)
+@router.get("/me")
 async def read_users_me(current_user: UserModel = Depends(get_current_user)):
-    """获取当前用户信息"""
-    return UserResponse.model_validate(current_user)
+    """获取当前用户信息 - 返回格式匹配前端期望"""
+    return {
+        "ok": True,
+        "user": {
+            "id": current_user.id,
+            "username": current_user.username,
+            "email": current_user.email,
+            "createdAt": current_user.created_at
+        }
+    }

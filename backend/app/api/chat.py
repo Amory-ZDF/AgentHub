@@ -1,25 +1,115 @@
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from loguru import logger
 from sqlalchemy.orm import Session
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from backend.app.dependencies import get_db, get_orchestrator
 from backend.app.schemas import Message as MessageSchema, MessageCreate
+from backend.app.api.auth import get_current_user
+from backend.models.user import User as UserModel
 from backend.services.conversation_service import ConversationService
 
 router = APIRouter()
+
+# 前端发送的聊天请求模型
+class ChatRequest(BaseModel):
+    message: str
+    agent: Optional[Dict] = None
+    mission: Optional[Dict] = None
+
+# 简单的直接聊天接口，供前端调用
+@router.post("")
+async def simple_chat(
+    chat_req: ChatRequest,
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
+):
+    """简单的聊天接口，直接处理前端发送的消息（需登录），自动持久化消息到数据库"""
+    logger.info(f"[SIMPLE-CHAT] 用户{current_user.id} 收到消息: {chat_req.message}")
+
+    orchestrator = get_orchestrator()
+    if not hasattr(orchestrator, 'db_session') or orchestrator.db_session is None:
+        orchestrator.db_session = db
+
+    conv_service = ConversationService(db)
+
+    # 从 mission 中提取 conversation_id
+    conversation_id = None
+    if chat_req.mission and chat_req.mission.get('id'):
+        try:
+            mission_id = chat_req.mission['id']  # 格式 "mis_123"
+            conversation_id = int(mission_id.replace('mis_', ''))
+        except (ValueError, AttributeError):
+            conversation_id = None
+
+    # 如果有 mission 上下文，将用户消息持久化
+    if conversation_id:
+        conversation = conv_service.get_conversation(conversation_id)
+        if conversation and conversation.user_id == current_user.id:
+            conv_service.add_message_to_conversation(
+                conversation_id=conversation_id,
+                agent_id="user",
+                content=chat_req.message
+            )
+            logger.info(f"[SIMPLE-CHAT] 用户消息已存入 conversation {conversation_id}")
+        else:
+            logger.warning(f"[SIMPLE-CHAT] 对话 {conversation_id} 不存在或不属于当前用户")
+            conversation_id = None
+
+    try:
+        # 构建消息历史（包含历史消息 + 当前消息）
+        all_messages = []
+        if conversation_id:
+            history = conv_service.get_messages(conversation_id)
+            for msg in history:
+                all_messages.append({"role": msg.agent_id, "content": msg.content})
+        else:
+            all_messages = [{"role": "user", "content": chat_req.message}]
+
+        reply_content = None
+        if hasattr(orchestrator, 'get_chat_response'):
+            temp_conv_id = conversation_id or 0
+            response = await orchestrator.get_chat_response(
+                conversation_id=temp_conv_id,
+                messages=all_messages
+            )
+            if isinstance(response, dict) and "content" in response:
+                reply_content = response["content"]
+
+        if reply_content is None:
+            reply_content = f"你好！我收到了你的消息：'{chat_req.message}'。当前Agent: {chat_req.agent.get('name', '未知Agent') if chat_req.agent else '未指定Agent'}。"
+
+        # 将 AI 回复持久化到数据库
+        if conversation_id:
+            agent_id = chat_req.agent.get('id', 'assistant') if chat_req.agent else 'assistant'
+            conv_service.add_message_to_conversation(
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                content=reply_content
+            )
+            logger.info(f"[SIMPLE-CHAT] AI 回复已存入 conversation {conversation_id}")
+
+        return {"ok": True, "reply": reply_content}
+
+    except Exception as e:
+        logger.error(f"[SIMPLE-CHAT] 处理消息出错: {e}")
+        return {"ok": False, "error": str(e), "reply": f"处理出错: {str(e)}"}
 
 
 @router.get("/{conversation_id}/messages", response_model=List[MessageSchema])
 async def get_messages(
     conversation_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
 ):
-    """获取某个会话的所有消息"""
+    """获取某个会话的所有消息，仅限创建者"""
     conv_service = ConversationService(db)
     conversation = conv_service.get_conversation(conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="会话未找到")
+    if conversation.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权查看其他用户的会话")
     return conversation.messages
 
 
@@ -27,11 +117,12 @@ async def get_messages(
 async def send_message(
     conversation_id: int,
     message_in: MessageCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: UserModel = Depends(get_current_user)
 ):
     """
     在指定会话中发送新消息，并触发 Orchestrator 工作流。
-    Orchestrator 将负责处理记忆、执行任务并返回最终结果。
+    仅限会话创建者操作。
     """
     from sqlalchemy import inspect
     inspector = inspect(db.get_bind())
@@ -47,10 +138,14 @@ async def send_message(
         orchestrator.db_session = db
     conv_service = ConversationService(db)
 
-    # 1. 验证对话是否存在
-    if not conv_service.get_conversation(conversation_id):
+    # 1. 验证对话是否存在且属于当前用户
+    conversation = conv_service.get_conversation(conversation_id)
+    if not conversation:
         logger.warning(f"[CHAT API] 对话 {conversation_id} 未找到。")
         raise HTTPException(status_code=404, detail="会话未找到")
+    if conversation.user_id != current_user.id:
+        logger.warning(f"[CHAT API] 用户{current_user.id} 无权访问对话 {conversation_id}")
+        raise HTTPException(status_code=403, detail="无权访问其他用户的会话")
 
     # 2. 将用户消息存入数据库
     # 这是必要的，以便前端可以立即显示用户的消息

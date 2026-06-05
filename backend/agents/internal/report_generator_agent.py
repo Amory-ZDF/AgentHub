@@ -21,4 +21,16 @@ class ReportGeneratorAgent:
 请用清晰的标题，格式规范。"""
         response = llm.invoke(context + prompt)
         logger.info("✅ CodeReview工作流执行完成，生成最终审查报告")
-        return {**state, "final_answer": response.content.strip()}
+        if isinstance(response, str):
+            content = response.strip()
+        else:
+            # 通用兼容处理：支持所有返回格式（字符串、对象、协程）
+            if isinstance(response, str):
+                content = response.strip()
+            elif hasattr(response, 'content'):
+                content = response.content.strip()
+            elif hasattr(response, 'final_answer') and hasattr(response.final_answer, 'content'):
+                content = response.final_answer.content.strip()
+            else:
+                content = str(response).strip()
+        return {**state, "final_answer": content}

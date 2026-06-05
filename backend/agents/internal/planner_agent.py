@@ -8,41 +8,32 @@ from backend.agents.base_agent import BaseAgent, AgentResponse, FinalAnswer
 from backend.models.message import Message
 
 # 定义新的系统提示词模板，指导 LLM 生成带依赖关系的计划
-SYSTEM_PROMPT_TEMPLATE = """
-你是一个 AI 项目规划师。你的任务是将一个复杂的用户请求拆解成一个由多个步骤组成的执行计划。
-你需要识别任务之间的依赖关系，以便它们可以被并行执行。
+SYSTEM_PROMPT_TEMPLATE = """你是一个任务规划器。根据用户需求，将任务拆解为子任务列表，每个子任务包含以下字段（JSON数组格式）：
 
-**你必须从以下可用 Agent 列表中选择执行每个步骤的 Agent:**
-{available_agents}
-
-请根据用户的请求，输出一个 JSON 格式的执行计划。
-这个计划是一个列表，列表中的每个对象代表一个步骤。
-
-每个步骤对象必须包含以下字段:
-- "step_id": 一个唯一的整数，从 1 开始。
-- "agent_id": 执行此步骤的 Agent 的 ID。
-- "prompt": 指向该 Agent 的具体指令。
-- "dependencies": 一个列表，包含此步骤所依赖的所有前置步骤的 "step_id"。如果一个步骤没有依赖，请使用一个空列表 `[]`。
-
-**示例格式:**
-```json
 [
   {{
-    "step_id": 1,
-    "agent_id": "tongyi",
-    "prompt": "写一个 Python 函数，实现斐波那契数列。",
-    "dependencies": []
-  }},
-  {{
-    "step_id": 2,
-    "agent_id": "deepseek",
-    "prompt": "审查步骤 1 中生成的斐波那契函数代码。",
-    "dependencies": [1]
+    "step_id": "1",
+    "agent_id": "可用的agent_id",
+    "prompt": "下发给子Agent的精确指令（要求具体，包含约束条件）",
+    "expectations": {{
+      "pass": "及格标准",
+      "standard": "期望标准",
+      "excellent": "优异标准（可选）"
+    }},
+    "output_format": "期望的输出格式",
+    "max_retries": 2,
+    "dependencies": []       // 依赖的前置step_id，如["0"]
   }}
 ]
-```
 
-现在，请根据用户的请求生成计划。
+规则：
+1. 可用 agent: {available_agents}
+2. {skills_prompt}
+   如果任务需要调用工具，必须在子任务的prompt中明确告诉执行agent使用哪个技能，格式为"SKILL_CALL: skill_name method params"
+3. 如果子任务需要前面任务的结果，必须在 dependencies 中标明。
+4. prompt 应自包含，但可以引用黑板上下文（如"根据之前的查询结果..."），上下文会自动注入。
+5. 仅有独立、可并行的任务才不用填写 dependencies。
+{history_context}
 """
 
 
@@ -103,11 +94,18 @@ class PlannerAgent(BaseAgent):
         # 从上下文中获取可用的 Agent 列表，并格式化
         available_agents = context.get("available_agents", [])
         if not available_agents:
-            logger.error("错误：PlannerAgent 未在上下文中收到 available_agents 列表。")
-            return AgentResponse(final_answer=FinalAnswer(content="[]"))
-
+            logger.error("错误：PlannerAgent 未在上下文中收到 available_agents = list(orchestrator.agents.keys()")
         agent_list_str = "\n".join([f"- {agent_id}" for agent_id in available_agents])
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(available_agents=agent_list_str)
+        # 从context中获取技能列表，和available_agents一样通过参数传入，解耦orchestrator依赖
+        skills_prompt = context.get("available_skills_prompt", "暂无可用技能")
+        # 注入历史摘要到planner的prompt
+        historical_summary = context.get("historical_summary", "")
+        history_context = f"\n历史对话摘要：{historical_summary}" if historical_summary else "\n暂无历史对话摘要"
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            available_agents=agent_list_str, 
+            skills_prompt=skills_prompt,
+            history_context=history_context
+        )
 
         # 构建发送给 LLM 的消息，注入动态生成的系统提示词
         llm_messages = [

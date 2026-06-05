@@ -140,6 +140,7 @@
 <div id="modal-agent-diff"     class="fixed inset-0 z-50 hidden"></div>
 <div id="modal-mcp-connect"    class="fixed inset-0 z-50 hidden"></div>
 <div id="modal-add-agent"      class="fixed inset-0 z-50 hidden"></div>
+<div id="modal-edit-agent"     class="fixed inset-0 z-50 hidden"></div>
 <div id="modal-save-as-mission" class="fixed inset-0 z-50 hidden"></div>
 <div id="modal-auth"           class="fixed inset-0 z-50 hidden"></div>
 <div id="mention-popover"      class="fixed z-50 hidden"></div>
@@ -155,43 +156,10 @@ const escapeHTML = (s='') => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;'
 const escapeAttr = escapeHTML;
 
 /* ===== builtin skills ===== */
-const BUILTIN_SKILLS = [
-  { id:'web_search',    name:'web_search',    icon:'language',     desc:'联网搜索实时信息' },
-  { id:'web_fetch',     name:'web_fetch',     icon:'public',       desc:'抓取并提取网页内容' },
-  { id:'web_scrape',    name:'web_scrape',    icon:'travel_explore',desc:'结构化抓取竞品/数据' },
-  { id:'pdf_parse',     name:'pdf_parse',     icon:'picture_as_pdf',desc:'PDF 文本与表格抽取' },
-  { id:'code_exec',     name:'code_exec',     icon:'terminal',     desc:'Python/Node 代码沙箱执行' },
-  { id:'chart_render',  name:'chart_render',  icon:'insert_chart', desc:'渲染图表' },
-  { id:'markdown_write',name:'markdown_write',icon:'description',  desc:'生成 Markdown' },
-  { id:'kdocs_read',    name:'kdocs_read',    icon:'menu_book',    desc:'读取在线文档' },
-  { id:'kdocs_publish', name:'kdocs_publish', icon:'cloud_upload', desc:'发布到在线文档' },
-  { id:'screenshot',    name:'screenshot',    icon:'screenshot',   desc:'网页截图' },
-  { id:'email_compose', name:'email_compose', icon:'mail',         desc:'撰写邮件草稿' },
-  { id:'diff_compare',  name:'diff_compare',  icon:'difference',   desc:'文本/数据 diff' },
-  { id:'sec_filing_lookup', name:'sec_filing_lookup', icon:'finance_mode', desc:'SEC 备案文件检索' },
-];
+const BUILTIN_SKILLS = [];
 
 /* ===== templates ===== */
-const TEMPLATES = [
-  { id:'tpl_fin',  icon:'analytics',     name:'财报分析', desc:'季度财报多维度对比与摘要生成',
-    agents:['数据抽取师','数据分析师','报告撰写师'],
-    skills:['pdf_parse','sec_filing_lookup','code_exec','chart_render','markdown_write'] },
-  { id:'tpl_code', icon:'code',          name:'代码 Review', desc:'针对 PR 的安全与风格静态分析',
-    agents:['静态扫描师','安全审计师','改进建议师'],
-    skills:['code_exec','diff_compare'] },
-  { id:'tpl_comp', icon:'troubleshoot',  name:'竞品监控', desc:'抓取竞品页面变更并生成周报',
-    agents:['信息采集师','变更分析师','报告整合师'],
-    skills:['web_scrape','screenshot','diff_compare','markdown_write'] },
-  { id:'tpl_week', icon:'newspaper',     name:'周报生成', desc:'多源数据汇总为标准化周报',
-    agents:['数据收集师','内容整合师','排版师'],
-    skills:['kdocs_read','markdown_write','kdocs_publish'] },
-  { id:'tpl_mail', icon:'mail',          name:'邮件分类回复', desc:'对收件箱进行分类并生成草稿',
-    agents:['分类师','优先级判断师','草稿撰写师'],
-    skills:['email_compose','markdown_write'] },
-  { id:'tpl_art',  icon:'auto_stories',  name:'文章拆解', desc:'拆解长文主旨与框架，给出改写建议',
-    agents:['主旨提取师','框架分析师','改写建议师'],
-    skills:['web_fetch','markdown_write'] },
-];
+const TEMPLATES = [];
 
 /* ===== seed missions ===== */
 function makeAgent(name, role, icon, prompt, skills, kind='agent') {
@@ -224,98 +192,17 @@ function makeAgent(name, role, icon, prompt, skills, kind='agent') {
   };
 }
 
-const MISSIONS = [
-  {
-    id: 'mis_fin', name:'美股财报分析', icon:'analytics',
-    description:'按季度抓取并对比美股公司的关键财务指标，输出可分享的分析摘要。',
-    squad: {
-      agents: [
-        makeAgent('Financial Analyst','统筹整个财报分析流程，拆解任务并调度团队。','finance_mode',
-          '你是一名资深金融分析师，作为本 Mission 的 Manager，负责统筹整个分析流程：拆解季度报告关键问题、调度 Data Extractor 抽取所需数据、调度 Report Writer 撰写最终报告，并对团队产出做最终质量把关。',
-          ['code_exec','chart_render','diff_compare']),
-        makeAgent('Data Extractor','负责从 SEC EDGAR 与 PDF 中抽取结构化数据。','description',
-          '你是一名结构化数据抽取专家，专注从 PDF 与 HTML 备案文件中提取可机读字段。',
-          ['pdf_parse','sec_filing_lookup','web_fetch']),
-        makeAgent('Report Writer','把分析结论写成结构化 Markdown 报告。','edit_note',
-          '你负责把分析师的结论以清晰、客观、面向高管的方式撰写为 Markdown。',
-          ['markdown_write']),
-      ],
-      enabledSkills:['pdf_parse','sec_filing_lookup','code_exec','chart_render','markdown_write','diff_compare','web_fetch'],
-      coordinator:{ name:'Coordinator', role:'分派子 Agent + 解析自然语言编辑' }
-    },
-    runs: [
-      { id:'run_current', title:'当前运行', status:'running', startedAt:'10:42 AM',
-        conversation: [
-          { type:'user', who:'You', time:'10:42 AM',
-            text:'请分析特斯拉 2023 Q4 的毛利率变化趋势，并对比其主要竞争对手比亚迪的数据。' },
-          { type:'agent', agent:'Financial Analyst', icon:'finance_mode', time:'10:43 AM',
-            text:'正在获取特斯拉与比亚迪的财务报告数据。我将启动 SEC 数据检索与图表渲染。',
-            tool: { name:'financial_scraper(ticker="TSLA", period="Q4_2023")',
-              log:'> 初始化数据检索...\n> 成功访问 SEC EDGAR 备案文件。\n> 解析毛利率元数据...' } },
-          { type:'agent', agent:'Financial Analyst', icon:'finance_mode', time:'10:44 AM',
-            text:'分析已完成。我为您生成了趋势对比图表，并在文档区起草了摘要。' },
-        ],
-        artifact: { type:'chart-line', title:'毛利率对比: TSLA vs BYD' } },
-      { id:'run_tsla_q4', title:'Tesla Q4 Analysis', status:'completed', lastActiveAt:'2 天前',
-        conversation:[
-          { type:'user', who:'You', time:'09:11 AM', text:'帮我看下 Tesla Q4 的关键指标。' },
-          { type:'agent', agent:'Data Extractor', icon:'description', time:'09:12 AM',
-            text:'已提取 5 个核心指标：毛利率、自由现金流、交付量、运营利润、营收同比。' },
-        ],
-        artifact:{ type:'kpi', items:[{label:'营收',value:'$25.1B'},{label:'交付',value:'484K'}] } },
-      { id:'run_nvda', title:'NVIDIA 2024 Prep', status:'completed', lastActiveAt:'5 天前',
-        conversation:[
-          { type:'user', who:'You', time:'昨天', text:'为 NVDA 财报会准备一份预测。' },
-          { type:'agent', agent:'Financial Analyst', icon:'finance_mode', time:'昨天',
-            text:'基于过去 4 个季度数据 + 共识预期，已生成预测报告草稿。' },
-        ],
-        artifact:{ type:'kpi', items:[{label:'EPS 预期',value:'5.59'},{label:'毛利率',value:'74%'}] } },
-    ]
-  },
-  {
-    id:'mis_comp', name:'竞品监控', icon:'troubleshoot',
-    description:'每周自动抓取竞品官网与定价页变更，生成差异报告。',
-    squad: {
-      agents: [
-        makeAgent('Web Scout','负责抓取竞品页面与官方博客。','public',
-          '你是一名 Web 信息采集员，关注定价页、Changelog、新功能宣发。',
-          ['web_scrape','screenshot']),
-        makeAgent('Change Analyst','对比快照差异并提炼语义变更。','difference',
-          '你擅长从原始 HTML diff 中归纳出语义级变更（如降价、停售）。',
-          ['diff_compare']),
-      ],
-      enabledSkills:['web_scrape','screenshot','diff_compare','markdown_write'],
-      coordinator:{ name:'Coordinator' }
-    },
-    runs:[ { id:'run_current', title:'当前运行', status:'idle', conversation:[], artifact:null } ]
-  },
-  {
-    id:'mis_week', name:'周报生成', icon:'newspaper',
-    description:'整合日历、文档、Slack 消息生成每周交付的标准周报。',
-    squad: {
-      agents: [
-        makeAgent('Data Collector','从日历与文档抓取本周事件。','event',
-          '你负责汇总日历事件、PR 合并记录、关键文档变更。',
-          ['kdocs_read']),
-        makeAgent('Composer','按周报模板组织内容。','edit_note',
-          '你是一名内容整合师，按公司标准周报模板撰写。',
-          ['markdown_write','kdocs_publish']),
-      ],
-      enabledSkills:['kdocs_read','markdown_write','kdocs_publish'],
-      coordinator:{ name:'Coordinator' }
-    },
-    runs:[ { id:'run_current', title:'当前运行', status:'idle', conversation:[], artifact:null } ]
-  }
-];
+const MISSIONS = [];
 
 /* ===== global state ===== */
 const state = {
   view: 'dashboard',
-  missionId: 'mis_fin',
+  missionId: null,
   runId: 'run_current',
   rightTab: 'agents',
   selectedAgentId: null,
-  missions: MISSIONS,
+  missions: [],  // 从后端加载
+  customAgents: [],  // 从后端 API 加载的自定义 Agent
   customSkills: [],
   // Skills 系统（market + mine）
   skills: { market: [], mine: [], loaded: false },
@@ -323,6 +210,8 @@ const state = {
   agentLibraryTab: 'mine',    // 'mine' | 'market'
   agentKindFilter: 'all',     // 'all' | 'team' | 'agent'
   agentLibraryQuery: '',
+  // 注：agentCreateModal 不需要额外状态，create modal 直接复用 modal-create-mission
+  agentCreateModal: false,  // 自定义Agent创建弹窗
   agentToolsSkillQuery: '',
   skillEdit: null,            // { id?, slug, name, icon, description, code, category }
   attachCreatedSkillToCurrentAgent: false,
@@ -366,12 +255,32 @@ const getRun = () => {
 
 /* ===== SideNav ===== */
 function renderSideNav() {
+  console.log('[DEBUG-SIDEBAR] 开始执行renderSideNav()');
   // Missions 大类是否激活（Quick Run 已独立，不再触发 Missions 高亮）
   const missionsTabActive = ['dashboard','mission'].includes(state.view);
   const quickRunActive = state.view === 'quickRun';
 
+  // 先定义所有内部函数和变量
+  const renderTopTab = (id, icon, label, onclick) => {
+    const active = (id === 'missions' && missionsTabActive)
+                || (id === 'agents'    && state.view === 'agents')
+                || (id === 'skills'    && state.view === 'skills')
+                || (id === 'kbs'       && (state.view === 'kbs' || state.view === 'kb_detail'))
+                || (id === 'settings'  && state.view === 'settings');
+    return `
+      <a onclick="${onclick}"
+         class="flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-colors
+                ${active ? 'bg-secondary-container text-on-surface font-medium'
+                         : 'text-on-surface-variant hover:bg-surface-container-low'}">
+        <span class="material-symbols-outlined text-[20px]">${icon}</span>
+        <span class="text-body-md">${label}</span>
+      </a>`;
+  };
+
   // 子项列表（仅当 Missions Tab 激活时展开）
+  console.log('[DEBUG-SIDEBAR] 渲染侧边栏，每个mission:', state.missions);
   const missionItems = state.missions.map(m => {
+    console.log('[DEBUG-SIDEBAR] 当前mission:', m, 'name=', m.name, 'icon=', m.icon, 'runs.length=', m.runs?.length);
     const active = state.view === 'mission' && m.id === state.missionId;
     const runsHTML = active ? `
       <div class="ml-6 mt-0.5 space-y-0.5 border-l border-outline-variant/60 pl-3 pb-1">
@@ -395,7 +304,11 @@ function renderSideNav() {
             <span class="material-symbols-outlined text-[16px]">${m.icon}</span>
             <span class="text-label-md truncate">${escapeHTML(m.name)}</span>
           </div>
-          <span class="text-[10px] text-secondary opacity-70">${m.runs.length}</span>
+          <div class="flex items-center gap-1">
+            <span class="text-[10px] text-secondary opacity-70">${m.runs.length}</span>
+            <span class="material-symbols-outlined text-[14px] text-red-500 hover:text-red-700 cursor-pointer opacity-60 hover:opacity-100"
+                  onclick="event.stopPropagation(); deleteMission('${m.id}')" title="删除">delete</span>
+          </div>
         </a>
         ${runsHTML}
       </div>`;
@@ -409,23 +322,7 @@ function renderSideNav() {
       ${missionItems}
     </div>` : '';
 
-  // 主 Tab 渲染器
-  const renderTopTab = (id, icon, label, onclick) => {
-    const active = (id === 'missions' && missionsTabActive)
-                || (id === 'agents'    && state.view === 'agents')
-                || (id === 'skills'    && state.view === 'skills')
-                || (id === 'kbs'       && (state.view === 'kbs' || state.view === 'kb_detail'))
-                || (id === 'settings'  && state.view === 'settings');
-    return `
-      <a onclick="${onclick}"
-         class="flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-colors
-                ${active ? 'bg-secondary-container text-on-surface font-medium'
-                         : 'text-on-surface-variant hover:bg-surface-container-low'}">
-        <span class="material-symbols-outlined text-[20px]">${icon}</span>
-        <span class="text-body-md">${label}</span>
-      </a>`;
-  };
-
+  // 最后return整个侧边栏的HTML，确保所有变量都定义了
   return `
     <aside class="w-[260px] h-full border-r border-outline-variant bg-surface flex flex-col p-3 shrink-0">
       <!-- Logo -->
@@ -486,6 +383,43 @@ function renderSideNav() {
         }
       </div>
     </aside>`;
+}
+
+// 添加删除mission的函数
+async function deleteMission(missionId) {
+  if (!confirm(`确定要删除任务 "${state.missions.find(m => m.id === missionId)?.name}" 吗？`)) {
+    return;
+  }
+  
+  try {
+    const response = await api(`/missions/${missionId}`, {
+      method: 'DELETE'
+    });
+    
+    if (response && response.ok) {
+      // 从前端状态中移除
+      state.missions = state.missions.filter(m => m.id !== missionId);
+      // 如果删除的是当前选中的mission，切换到第一个
+      if (state.missionId === missionId && state.missions.length > 0) {
+        state.missionId = state.missions[0].id;
+      } else if (state.missions.length === 0) {
+        state.missionId = null;
+      }
+      showToast('任务已删除', 'success');
+      render();
+    } else {
+      showToast('删除失败：后端返回错误', 'error');
+    }
+  } catch (error) {
+    console.error('删除mission失败:', error);
+    // 即使后端API失败，也从前端移除
+    state.missions = state.missions.filter(m => m.id !== missionId);
+    if (state.missionId === missionId && state.missions.length > 0) {
+      state.missionId = state.missions[0].id;
+    }
+    showToast('已本地删除（后端API调用失败）', 'warning');
+    render();
+  }
 }
 
 /* ===== TopBar ===== */
@@ -555,11 +489,28 @@ function renderTopBar() {
 
 /* ===== Router ===== */
 function openDashboard() { if (!confirmLeaveDirty()) return; state.view='dashboard'; render(); }
-function openMission(id) {
+async function openMission(id) {
   if (!confirmLeaveDirty()) return;
   state.view='mission'; state.missionId=id;
   const m = getMission(); state.runId = m.runs[0].id;
   state.selectedAgentId = m.squad.agents[0]?.id || null;
+  // 异步加载历史聊天消息
+  try {
+    const convId = id.replace('mis_', '');
+    const msgs = await api(`/chat/${convId}/messages`);
+    if (Array.isArray(msgs) && msgs.length > 0) {
+      const run = getRun();
+      run.conversation = msgs.map(msg => ({
+        type: msg.agent_id === 'user' ? 'user' : 'agent',
+        agent: msg.agent_id === 'user' ? '我' : (m.squad.agents.find(a => a.id === msg.agent_id)?.name || msg.agent_id),
+        icon: msg.agent_id === 'user' ? 'person' : (m.squad.agents.find(a => a.id === msg.agent_id)?.icon || 'smart_toy'),
+        text: msg.content,
+        time: msg.created_at
+      }));
+    }
+  } catch (e) {
+    console.log('[MISSION] 加载历史消息失败或没有历史消息:', e);
+  }
   render();
 }
 function openRun(missionId, runId) {
@@ -639,7 +590,6 @@ function saveCustomSkills() {
   try { localStorage.setItem(CUSTOM_SKILLS_STORAGE_KEY, JSON.stringify(state.customSkills || [])); }
   catch (e) { console.warn('saveCustomSkills failed', e); }
 }
-
 function ensureAgentSchema(a) {
   if (!a) return a;
   // 旧值兼容：'main' / 'manager' → 'team'；'sub' / 'member' → 'agent'
@@ -906,12 +856,11 @@ function toggleIntro() {
   render();
 }
 
-function createMissionFromTemplate(tplId) {
+async function createMissionFromTemplate(tplId) {
   const tpl = TEMPLATES.find(t => t.id === tplId);
   if (!tpl) return;
-  const newMission = {
-    id: uid('mis'), name: tpl.name + ' 副本', icon: tpl.icon,
-    description: tpl.desc,
+  const missionData = {
+    name: tpl.name + ' 副本',
     squad: {
       agents: tpl.agents.map((name,i) => makeAgent(
         name,
@@ -922,12 +871,43 @@ function createMissionFromTemplate(tplId) {
       )),
       enabledSkills: tpl.skills,
       coordinator: { name:'Coordinator' }
-    },
-    runs: [{ id:'run_current', title:'当前运行', status:'idle', conversation:[], artifact:null }]
+    }
   };
-  state.missions.unshift(newMission);
-  showToast(`已从模板创建：${newMission.name}`, 'success');
-  openMission(newMission.id);
+  
+  try {
+    // 调用后端API创建mission
+    const response = await api('/missions', {
+      method: 'POST',
+      body: JSON.stringify(missionData)
+    });
+    
+    if (response && response.ok && response.mission) {
+      state.missions.unshift(response.mission);
+      showToast(`已从模板创建：${response.mission.name}`, 'success');
+      openMission(response.mission.id);
+    } else {
+      // 如果后端API失败，前端临时创建
+      const newMission = {
+        id: uid('mis'), name: tpl.name + ' 副本', icon: tpl.icon,
+        runs: [{ id:'run_current', title:'当前运行', status:'idle', conversation:[], artifact:null }],
+        squad: missionData.squad
+      };
+      state.missions.unshift(newMission);
+      showToast(`已从模板创建（本地临时）：${newMission.name}`, 'warning');
+      openMission(newMission.id);
+    }
+  } catch (error) {
+    console.error('创建mission失败:', error);
+    const newMission = {
+      id: uid('mis'), name: tpl.name + ' 副本', icon: tpl.icon,
+      runs: [{ id:'run_current', title:'当前运行', status:'idle', conversation:[], artifact:null }],
+      squad: missionData.squad
+    };
+    state.missions.unshift(newMission);
+    showToast(`创建失败，已本地创建：${newMission.name}`, 'error');
+    openMission(newMission.id);
+  }
+  render();
 }
 
 /* placeholders — 后续步骤填充 */
@@ -1659,183 +1639,76 @@ function openSaveAsMissionModal(){ openModalSaveAsMission(); }
 /* ===================== Modal: Create Mission ===================== */
 function openCreateMission() { openModalCreateMission(); }
 
-function openModalCreateMission() {
+async function openModalCreateMission() {
   const root = $('#modal-create-mission');
   root.classList.remove('hidden');
   root.innerHTML = `
     <div class="absolute inset-0 modal-overlay" onclick="closeModal('modal-create-mission')"></div>
     <div class="relative h-full w-full flex items-center justify-center p-lg" onclick="event.stopPropagation()">
-      <div class="bg-surface-container-lowest rounded-xl shadow-2xl w-[920px] max-w-full max-h-[88vh] overflow-hidden flex flex-col">
+      <div class="bg-surface-container-lowest rounded-xl shadow-2xl w-[520px] max-w-full overflow-hidden flex flex-col">
         <div class="px-lg py-md border-b border-outline-variant flex items-center justify-between">
-          <div>
-            <h3 class="text-headline-md text-on-surface">创建新任务</h3>
-            <p class="text-label-md text-secondary mt-0.5">选择起步方式：从模板、AI 引导或空白开始。</p>
-          </div>
+          <h3 class="text-headline-md text-on-surface">创建新任务</h3>
           <button onclick="closeModal('modal-create-mission')" class="p-1 rounded hover:bg-surface-container">
             <span class="material-symbols-outlined text-secondary">close</span>
           </button>
         </div>
-        <div class="flex-1 overflow-y-auto p-lg space-y-lg">
-          <!-- 段 1：模板 -->
-          <section>
-            <p class="font-label-md text-on-surface mb-2 flex items-center gap-2">
-              <span class="material-symbols-outlined text-secondary text-[18px]">grid_view</span>从模板开始
-              <span class="text-label-sm text-secondary font-normal">推荐</span>
-            </p>
-            <div class="grid grid-cols-3 gap-md">
-              ${TEMPLATES.map(t => `
-                <div onclick="createMissionFromTemplate('${t.id}'); closeModal('modal-create-mission');"
-                     class="border border-outline-variant rounded-xl p-md cursor-pointer hover:border-primary/40 hover:shadow-sm transition-all">
-                  <div class="flex items-center gap-2 mb-2">
-                    <div class="w-9 h-9 rounded-lg bg-primary-fixed flex items-center justify-center">
-                      <span class="material-symbols-outlined text-on-primary-fixed-variant text-[18px]">${t.icon}</span>
-                    </div>
-                    <p class="font-label-md text-on-surface">${escapeHTML(t.name)}</p>
-                  </div>
-                  <p class="text-label-sm text-secondary line-clamp-2">${escapeHTML(t.desc)}</p>
-                  <div class="flex flex-wrap gap-1 mt-2">
-                    ${t.agents.map(a => `<span class="text-[10px] px-1.5 py-0.5 bg-surface-container rounded text-secondary">${escapeHTML(a)}</span>`).join('')}
-                  </div>
-                </div>`).join('')}
-            </div>
-          </section>
-
-          <!-- 段 2：AI 引导 -->
-          <section class="bg-primary-fixed/30 border border-primary/30 rounded-xl p-md">
-            <p class="font-label-md text-on-primary-fixed-variant mb-2 flex items-center gap-2">
-              <span class="material-symbols-outlined text-primary text-[18px]">auto_awesome</span>用一句话描述你想做的事
-            </p>
-            <div class="flex gap-2">
-              <textarea id="ai-prompt-input" rows="2" placeholder="例如：每周二自动抓取 OpenAI / Anthropic 官网更新，输出 Markdown 摘要..."
-                class="flex-1 bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 text-body-md focus:border-primary focus:ring-0 resize-none"></textarea>
-              <button onclick="aiProposeFromInput()" class="self-end bg-primary text-white px-3 py-2 rounded-lg flex items-center gap-1.5 text-label-md hover:opacity-90">
-                <span class="material-symbols-outlined text-[16px]">auto_awesome</span>AI 引导生成
-              </button>
-            </div>
-          </section>
-
-          <!-- 段 3：空白 -->
-          <section class="border border-dashed border-outline-variant rounded-xl p-md flex items-center justify-between">
-            <div class="flex items-center gap-3">
-              <div class="w-9 h-9 rounded-lg bg-surface-container flex items-center justify-center">
-                <span class="material-symbols-outlined text-secondary text-[18px]">draft</span>
-              </div>
-              <div>
-                <p class="font-label-md text-on-surface">从空白开始</p>
-                <p class="text-label-sm text-secondary">仅含 Coordinator，由你自由组装 Agent 与 Skill。</p>
-              </div>
-            </div>
-            <button onclick="createBlankMission()" class="px-3 py-1.5 bg-surface-container text-on-surface rounded-lg text-label-md hover:bg-surface-container-high">创建空白</button>
-          </section>
-        </div>
-      </div>
-    </div>`;
-}
-
-function aiProposeFromInput() {
-  const txt = $('#ai-prompt-input')?.value.trim();
-  if (!txt) { showToast('请先描述你的需求', 'error'); return; }
-  closeModal('modal-create-mission');
-  openModalAIProposal(txt);
-}
-
-function createBlankMission() {
-  const m = {
-    id: uid('mis'), name:'未命名任务', icon:'draft',
-    description:'空白任务，待定义。',
-    squad:{ agents:[], enabledSkills:[], coordinator:{ name:'Coordinator' } },
-    runs:[{ id:'run_current', title:'当前运行', status:'idle', conversation:[], artifact:null }]
-  };
-  state.missions.unshift(m);
-  closeModal('modal-create-mission');
-  openMission(m.id);
-  showToast('已创建空白 Mission', 'success');
-}
-
-/* ===================== Modal: AI Proposal ===================== */
-function openModalAIProposal(userPrompt) {
-  const root = $('#modal-ai-proposal');
-  root.classList.remove('hidden');
-  // 简单根据关键词推断模板
-  const lower = userPrompt.toLowerCase();
-  let pick = TEMPLATES[2];
-  if (/财报|earning|stock|股/.test(userPrompt)) pick = TEMPLATES[0];
-  else if (/代码|code|pr|review/.test(lower))  pick = TEMPLATES[1];
-  else if (/周报|weekly|report/.test(lower))    pick = TEMPLATES[3];
-  else if (/邮件|mail|email/.test(lower))       pick = TEMPLATES[4];
-  else if (/文章|article|blog|拆解/.test(lower))pick = TEMPLATES[5];
-
-  root.innerHTML = `
-    <div class="absolute inset-0 modal-overlay" onclick="closeModal('modal-ai-proposal')"></div>
-    <div class="relative h-full w-full flex items-center justify-center p-lg" onclick="event.stopPropagation()">
-      <div class="bg-surface-container-lowest rounded-xl shadow-2xl w-[640px] max-w-full max-h-[88vh] overflow-hidden flex flex-col">
-        <div class="px-lg py-md border-b border-outline-variant flex items-center gap-2">
-          <span class="material-symbols-outlined text-primary">auto_awesome</span>
-          <h3 class="text-headline-md text-on-surface">Coordinator 的建议班底</h3>
-        </div>
-
-        <div class="px-lg py-md bg-primary-fixed/20 border-b border-outline-variant text-label-md text-on-primary-fixed-variant">
-          基于你的需求：<b>${escapeHTML(userPrompt)}</b>
-        </div>
-
-        <div class="flex-1 overflow-y-auto p-lg space-y-md">
-          <p class="font-label-md text-on-surface">推荐 ${pick.agents.length} 个 Agent：</p>
-          ${pick.agents.map((a,i) => `
-            <div class="flex items-start gap-3 p-3 bg-surface-container-low rounded-xl border border-outline-variant">
-              <div class="w-10 h-10 rounded-lg bg-secondary-container flex items-center justify-center">
-                <span class="material-symbols-outlined text-on-surface-variant text-[18px]">smart_toy</span>
-              </div>
-              <div class="flex-1">
-                <p class="font-label-md text-on-surface">${escapeHTML(a)}</p>
-                <p class="text-label-sm text-secondary mt-0.5 italic">负责处理「${escapeHTML(pick.name)}」流程中的第 ${i+1} 步任务。</p>
-              </div>
-            </div>`).join('')}
-          <div class="pt-2">
-            <p class="font-label-md text-on-surface mb-2">推荐技能：</p>
-            <div class="flex flex-wrap gap-1.5">
-              ${pick.skills.map(s => `
-                <span class="text-label-sm px-2 py-1 bg-surface-container border border-outline-variant rounded-full flex items-center gap-1 text-on-surface-variant">
-                  <span class="material-symbols-outlined text-[14px] text-secondary">${BUILTIN_SKILLS.find(x=>x.id===s)?.icon||'extension'}</span>${escapeHTML(s)}
-                </span>`).join('')}
-            </div>
+        <div class="p-lg space-y-md">
+          <div>
+            <label class="text-label-md text-on-surface font-medium block mb-1">任务名称 <span class="text-error">*</span></label>
+            <input id="create-mission-name" type="text" placeholder="例如：财报分析、竞品监控..."
+              class="w-full bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 text-body-md focus:border-primary focus:ring-0" />
           </div>
+          <div>
+            <label class="text-label-md text-on-surface font-medium block mb-1">任务描述（可选）</label>
+            <textarea id="create-mission-desc" rows="3" placeholder="描述你的任务目标，Orchestrator 将根据任务自动分配合适的 Agent..."
+              class="w-full bg-surface-container-lowest border border-outline-variant rounded-lg px-3 py-2 text-body-md focus:border-primary focus:ring-0 resize-none"></textarea>
+          </div>
+          <p class="text-label-sm text-secondary">Agent 和 Skill 无需手动配置，Orchestrator 会在运行时根据任务动态调度。</p>
         </div>
-
         <div class="px-lg py-md border-t border-outline-variant flex items-center justify-end gap-2">
-          <button onclick="closeModal('modal-ai-proposal')" class="px-3 py-1.5 text-secondary text-label-md hover:underline">取消</button>
-          <button onclick="closeModal('modal-ai-proposal'); openModalCreateMission();" class="px-3 py-1.5 border border-outline-variant rounded-lg text-label-md text-on-surface hover:bg-surface-container">重新描述</button>
-          <button onclick="acceptAIProposal('${pick.id}', ${JSON.stringify(userPrompt).replace(/'/g,"\\'")})" class="px-3 py-1.5 bg-primary text-white rounded-lg text-label-md hover:opacity-90 flex items-center gap-1">
-            <span class="material-symbols-outlined text-[14px]">check</span>采纳并创建
+          <button onclick="closeModal('modal-create-mission')" class="px-3 py-1.5 text-secondary text-label-md hover:underline">取消</button>
+          <button onclick="handleCreateMission()" class="px-4 py-1.5 bg-primary text-white rounded-lg text-label-md hover:opacity-90 flex items-center gap-1">
+            <span class="material-symbols-outlined text-[16px]">add</span>创建
           </button>
         </div>
       </div>
     </div>`;
+  // 自动聚焦
+  setTimeout(() => $('#create-mission-name')?.focus(), 100);
 }
 
-function acceptAIProposal(tplId, userPrompt) {
-  closeModal('modal-ai-proposal');
-  const tpl = TEMPLATES.find(t => t.id === tplId);
-  const m = {
-    id: uid('mis'), name: tpl.name + ' · AI 引导',
-    icon: tpl.icon, description: userPrompt,
-    squad:{
-      agents: tpl.agents.map((name, i) => makeAgent(
-        name, `AI 引导生成：${name}`,
-        ['description','finance_mode','edit_note','public','difference','event'][i%6],
-        `你是 ${name}，专注于完成"${userPrompt}"任务中的一部分。`,
-        tpl.skills
-      )),
-      enabledSkills: tpl.skills,
-      coordinator:{ name:'Coordinator' }
-    },
-    runs:[{ id:'run_current', title:'当前运行', status:'idle', conversation:[
-      { type:'system', text:'Coordinator 已基于你的描述组建班底，准备就绪。' }
-    ], artifact:null }]
-  };
-  state.missions.unshift(m);
-  openMission(m.id);
-  showToast('Mission 已创建', 'success');
+async function handleCreateMission() {
+  const name = $('#create-mission-name')?.value.trim();
+  if (!name) { showToast('请输入任务名称', 'error'); return; }
+  const desc = $('#create-mission-desc')?.value.trim() || '';
+  
+  closeModal('modal-create-mission');
+  
+  try {
+    const response = await api('/missions', {
+      method: 'POST',
+      body: JSON.stringify({ name, description: desc })
+    });
+    
+    if (response && response.ok && response.mission) {
+      state.missions.unshift(response.mission);
+      showToast('任务创建成功', 'success');
+      openMission(response.mission.id);
+    } else {
+      throw new Error('后端返回异常');
+    }
+  } catch (error) {
+    console.error('创建任务失败:', error);
+    showToast('创建失败：' + (error.message || error), 'error');
+  }
 }
+
+/* ===== 兼容旧引用 — 改为调用简约创建 ===== */
+function createMissionFromTemplate() { openCreateMission(); }
+function createBlankMission() { openCreateMission(); }
+function aiProposeFromInput() { openCreateMission(); }
+function openModalAIProposal() { openCreateMission(); }
+function acceptAIProposal() { openCreateMission(); }
 
 /* ===================== Modal: Agent Diff ===================== */
 function openModalAgentDiff(payload) {
@@ -2067,7 +1940,10 @@ function renderModalAddAgent() {
           class="w-full pl-8 pr-3 py-2 bg-surface-container-lowest border border-outline-variant rounded-lg text-body-md focus:border-primary focus:ring-0"/>
       </div>
       ${myLib.length
-        ? `<div class="space-y-2">${myLib.map(s => rowAdd(s, `addAgentFromLibrary('${s.fromMissionId}','${s.id}','${missionId}')`)).join('')}</div>`
+        ? `<div class="space-y-2">${myLib.map(s => rowAdd(s, s.fromCustomAgent
+            ? `addAgentFromCustomAgent('${s.id}','${missionId}')`
+            : `addAgentFromLibrary('${s.fromMissionId}','${s.id}','${missionId}')`
+          )).join('')}</div>`
         : emptyBlock(search ? '没有匹配的 Agent。' : '你的其它 Mission 里还没有可推荐的 Agent。')}`;
   } else if (tab === 'market') {
     body = `
@@ -2727,6 +2603,20 @@ function showAgentPopover(textarea, mode='@') {
             </div>
             ${isEdit ? '<span class="material-symbols-outlined text-primary text-[14px] opacity-60">build</span>' : ''}
           </div>`).join('')}
+        ${(state.customAgents||[]).length ? `
+          <div class="border-t border-outline-variant/60 px-3 py-1 text-[10px] text-secondary bg-surface-container-low">自建 Agent（数据库）</div>
+          ${(state.customAgents||[]).map(a => `
+            <div onclick="selectAgentForTrigger('${(a.name||'').replace(/'/g,"\\'")}', '${mode}')"
+                 class="flex items-center gap-2 px-3 py-2 cursor-pointer ${isEdit ? 'hover:bg-primary-fixed/40' : 'hover:bg-surface-container'}">
+              <div class="w-7 h-7 rounded-full ${isEdit ? 'bg-primary-fixed' : 'bg-secondary-container'} flex items-center justify-center">
+                <span class="material-symbols-outlined ${isEdit ? 'text-on-primary-fixed-variant' : 'text-on-surface-variant'} text-[14px]">${a.icon || 'smart_toy'}</span>
+              </div>
+              <div class="min-w-0 flex-1">
+                <p class="font-label-md text-on-surface truncate">${escapeHTML(a.name||'')}</p>
+                <p class="text-label-sm text-secondary truncate">${escapeHTML(a.description || a.system_prompt || '')}</p>
+              </div>
+              <span class="text-[10px] text-secondary bg-surface-container px-1 rounded">自建</span>
+            </div>`).join('')}` : ''}
       </div>
       <div class="px-3 py-1.5 border-t ${borderClass} text-[10px] text-secondary bg-surface-container-low">
         ${tipText}
@@ -2753,7 +2643,7 @@ function closeModal(id) {
 }
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    ['modal-create-mission','modal-ai-proposal','modal-agent-diff','modal-mcp-connect','modal-save-as-mission','modal-auth'].forEach(closeModal);
+    ['modal-create-mission','modal-ai-proposal','modal-agent-diff','modal-mcp-connect','modal-edit-agent','modal-save-as-mission','modal-auth'].forEach(closeModal);
     hideMentionPopover();
   }
 });
@@ -2775,10 +2665,22 @@ function setAgentLibraryQuery(query) {
 }
 
 function renderAgentsPage() {
-  const mine = [];
+  const missionAgents = [];
   state.missions.forEach(m => {
-    m.squad.agents.forEach(a => mine.push({ ...a, missionName: m.name, missionId: m.id, source: 'mine' }));
+    m.squad.agents.forEach(a => missionAgents.push({ ...a, missionName: m.name, missionId: m.id, source: 'mine' }));
   });
+  const backendAgents = (state.customAgents || []).map(a => ({
+    ...a,
+    role: a.system_prompt || '',
+    icon: 'smart_toy',
+    kind: 'agent',
+    skills: a.tools || [],
+    model: a.llm_adapter || 'tongyi',
+    missionName: '自定义Agent',
+    missionId: '',
+    source: 'backend',
+  }));
+  const mine = [...missionAgents, ...backendAgents];
   const market = (state.agentMarket || []).map(a => ({ ...a, source: 'market' }));
   const tab = state.agentLibraryTab || 'mine';
   const kindFilter = state.agentKindFilter || 'all';
@@ -2817,14 +2719,17 @@ function renderAgentsPage() {
              ${kindFilter===id ? 'bg-surface text-primary font-bold shadow-sm' : 'text-secondary hover:text-on-surface'}">${label}</button>`;
 
   const cards = filtered.length ? filtered.map(a => {
+    const isBackend = a.source === 'backend';
     const cnt = countByName[a.name] || 1;
     const meta = getAgentKindMeta(a.kind);
-    const clickable = true;
-    const action = tab === "mine"
-      ? `openAgentDetail('${a.missionId}','${a.id}','mine')`
-      : `openAgentDetail('', '${a.id}', 'market')`;
+    const clickable = !isBackend;
+    const action = isBackend
+      ? ''
+      : tab === "mine"
+        ? `openAgentDetail('${a.missionId}','${a.id}','mine')`
+        : `openAgentDetail('', '${a.id}', 'market')`;
     return `
-      <div onclick="${action}"
+      <div onclick="${clickable ? action : ''}"
            class="bg-surface-container-lowest border border-outline-variant rounded-xl p-md ${clickable ? 'cursor-pointer hover:border-primary/40' : ''} transition-colors group">
         <div class="flex items-center gap-3 mb-2">
           <div class="w-10 h-10 rounded-lg ${a.kind === 'team' ? 'bg-primary-fixed text-on-primary-fixed-variant' : 'bg-secondary-container text-on-surface-variant'} flex items-center justify-center">
@@ -2833,11 +2738,13 @@ function renderAgentsPage() {
           <div class="min-w-0 flex-1">
             <p class="font-label-md text-on-surface truncate flex items-center gap-1.5">
               ${escapeHTML(a.name)}
+              ${isBackend ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-tertiary-fixed text-on-tertiary-fixed-variant">API</span>' : '<span class="text-[10px] px-1.5 py-0.5 rounded bg-surface-container text-on-surface-variant">内置</span>'}
               <span class="text-[10px] px-1.5 py-0.5 rounded ${a.kind === 'team' ? 'bg-primary text-white' : 'bg-secondary-container text-on-surface-variant'}">${meta.label}</span>
               ${tab === 'mine' && cnt>1 ? `<span class="text-[10px] bg-amber-100 text-amber-700 px-1 rounded" title="此名字出现在 ${cnt} 个 Mission 中">×${cnt}</span>` : ''}
             </p>
-            <p class="text-label-sm text-secondary truncate">${tab === 'mine' ? escapeHTML(a.missionName) : `@${escapeHTML(a.authorName || 'AgentHub')}`}</p>
+            <p class="text-label-sm text-secondary truncate">${isBackend ? `模型: ${escapeHTML(a.model)}` : escapeHTML(a.missionName)}</p>
           </div>
+          ${isBackend ? `<div class="flex items-center gap-0.5"><button onclick="event.stopPropagation();openEditCustomAgentModal('${escapeAttr(a.agent_id)}')" class="text-secondary hover:bg-surface-container/30 p-1 rounded transition-colors" title="编辑"><span class="material-symbols-outlined text-[16px]">edit</span></button><button onclick="event.stopPropagation();deleteCustomAgentAPI('${escapeAttr(a.agent_id)}','${escapeAttr(a.name)}')" class="text-error hover:bg-error-container/30 p-1 rounded transition-colors" title="删除"><span class="material-symbols-outlined text-[16px]">delete</span></button></div>` : ''}
         </div>
         <p class="text-body-md text-secondary italic line-clamp-2">${escapeHTML(a.role || meta.description)}</p>
         <div class="flex flex-wrap gap-1 mt-2">
@@ -2845,11 +2752,11 @@ function renderAgentsPage() {
           ${(a.skills || []).length>4 ? `<span class="text-[10px] text-secondary">+${(a.skills || []).length-4}</span>` : ''}
         </div>
         <div class="flex items-center justify-between text-[11px] text-secondary mt-2 pt-2 border-t border-outline-variant/60">
-          <span>${tab === 'mine' ? `${(a.versions||[]).length} 个历史版本` : `${(a.installCount||0).toLocaleString()} 安装`}</span>
-          <span class="opacity-0 group-hover:opacity-100 text-primary flex items-center gap-1">
+          <span>${isBackend ? `ID: ${escapeHTML(a.agent_id || '')}` : (tab === 'mine' ? `${(a.versions||[]).length} 个历史版本` : `${(a.installCount||0).toLocaleString()} 安装`)}</span>
+          ${isBackend ? '<span class="text-[10px] text-tertiary">后端注册</span>' : `<span class="opacity-0 group-hover:opacity-100 text-primary flex items-center gap-1">
             查看详情
             <span class="material-symbols-outlined text-[14px]">arrow_forward</span>
-          </span>
+          </span>`}
         </div>
       </div>`;
   }).join('') : `
@@ -2868,6 +2775,7 @@ function renderAgentsPage() {
           <div class="flex items-center gap-2">
             ${tabBtn('mine','我的库','folder_special', mine.length)}
             ${tabBtn('market','市场库','storefront', market.length)}
+            ${tab === 'mine' ? `<button onclick="openCreateAgentModal()" class="px-4 py-1.5 rounded-lg text-label-md flex items-center gap-2 bg-primary text-white hover:opacity-90 transition-opacity"><span class="material-symbols-outlined text-[16px]">add</span>创建自定义Agent</button>` : ''}
           </div>
           <div class="inline-flex items-center gap-1 p-1 bg-surface-container rounded-lg border border-outline-variant">
             ${filterBtn('all','全部')}
@@ -2896,6 +2804,87 @@ function renderAgentsPage() {
       </section>
       <section class="px-xl pb-xl grid grid-cols-3 gap-md">${cards}</section>
     </div>`;
+}
+
+/* ---- 创建自定义Agent 弹窗 ---- */
+function openCreateAgentModal() {
+  const root = $('#modal-create-mission');
+  root.classList.remove('hidden');
+  root.innerHTML = `
+    <div class="absolute inset-0 modal-overlay" onclick="closeModal('modal-create-mission')"></div>
+    <div class="relative h-full w-full flex items-center justify-center p-lg" onclick="event.stopPropagation()">
+      <div class="bg-surface-container-lowest rounded-xl shadow-2xl w-[520px] max-w-full max-h-[88vh] overflow-hidden flex flex-col">
+        <div class="px-lg py-md border-b border-outline-variant flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="material-symbols-outlined text-primary">smart_toy</span>
+            <h3 class="text-headline-md text-on-surface">创建自定义 Agent</h3>
+          </div>
+          <button onclick="closeModal('modal-create-mission')" class="p-1 rounded hover:bg-surface-container">
+            <span class="material-symbols-outlined text-secondary">close</span>
+          </button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-lg space-y-md">
+          <div>
+            <label class="text-label-md text-secondary mb-1 block">Agent 名称 <span class="text-error">*</span></label>
+            <input id="new-agent-name" placeholder="例如：代码审查助手"
+              class="w-full px-3 py-2 bg-surface-container-lowest border border-outline-variant rounded-lg text-body-md focus:outline-none focus:border-primary"/>
+          </div>
+          <div>
+            <label class="text-label-md text-secondary mb-1 block">图标</label>
+            <div class="grid grid-cols-12 gap-2" id="new-agent-icon-grid">
+              ${SKILL_ICON_OPTIONS.map(i => `
+                <button type="button" onclick="document.querySelectorAll('#new-agent-icon-grid button').forEach(b=>b.classList.remove('border-primary','bg-primary-fixed/40')); this.classList.add('border-primary','bg-primary-fixed/40'); state.newAgentIcon='${i}'"
+                  class="w-9 h-9 rounded-lg border border-outline-variant bg-surface-container-lowest flex items-center justify-center hover:border-primary/40 transition-colors${i==='smart_toy'?' border-primary bg-primary-fixed/40':''}">
+                  <span class="material-symbols-outlined text-[18px] text-on-surface-variant">${i}</span>
+                </button>
+              `).join('')}
+            </div>
+          </div>
+          <div>
+            <label class="text-label-md text-secondary mb-1 block">System Prompt <span class="text-error">*</span></label>
+            <textarea id="new-agent-prompt" rows="4" placeholder="描述这个 Agent 的职责和行为..."
+              class="w-full px-3 py-2 bg-surface-container-lowest border border-outline-variant rounded-lg text-body-md focus:outline-none focus:border-primary"></textarea>
+          </div>
+          <div>
+            <label class="text-label-md text-secondary mb-1 block">LLM 适配器</label>
+            <select id="new-agent-llm" class="w-full px-3 py-2 bg-surface-container-lowest border border-outline-variant rounded-lg text-body-md focus:outline-none focus:border-primary">
+              <option value="tongyi">通义千问 (tongyi)</option>
+              <option value="openai">OpenAI</option>
+              <option value="claude">Claude</option>
+              <option value="gemini">Gemini</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-label-md text-secondary mb-1 block">工具列表 (逗号分隔)</label>
+            <input id="new-agent-tools" placeholder="例如：web_search, code_exec, pdf_parse"
+              class="w-full px-3 py-2 bg-surface-container-lowest border border-outline-variant rounded-lg text-body-md focus:outline-none focus:border-primary"/>
+          </div>
+        </div>
+        <div class="px-lg py-md border-t border-outline-variant flex items-center justify-end gap-2">
+          <button onclick="closeModal('modal-create-mission')" class="px-3 py-1.5 text-secondary text-label-md hover:underline">取消</button>
+          <button onclick="submitCreateAgent()" class="px-3 py-1.5 bg-primary text-white rounded-lg text-label-md hover:opacity-90">创建</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function submitCreateAgent() {
+  const name = ($('#new-agent-name')?.value || '').trim();
+  const icon = state.newAgentIcon || 'smart_toy';
+  const systemPrompt = ($('#new-agent-prompt')?.value || '').trim();
+  const llmAdapter = $('#new-agent-llm')?.value || 'tongyi';
+  const toolsStr = ($('#new-agent-tools')?.value || '').trim();
+  const tools = toolsStr ? toolsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+  if (!name) { showToast('请输入 Agent 名称', 'error'); return; }
+  if (!systemPrompt) { showToast('请输入 System Prompt', 'error'); return; }
+
+  try {
+    await createCustomAgentAPI(name, icon, systemPrompt, llmAdapter, tools);
+    closeModal('modal-create-mission');
+  } catch (e) {
+    showToast('创建失败: ' + (e.message || e), 'error');
+  }
 }
 
 /* ---- Agents 库自然语言修改入口 ---- */
@@ -2983,46 +2972,31 @@ const SKILL_CATEGORIES = [
 ];
 const SKILL_CATEGORY_MAP = Object.fromEntries(SKILL_CATEGORIES.map(c => [c.id, c]));
 
-// 把 BUILTIN_SKILLS 标准化为统一格式（提供给 Skills 页面）
-function normalizedBuiltinSkills() {
-  return BUILTIN_SKILLS.map(s => ({
-    id: 'builtin_' + s.id,
-    slug: s.id,
-    name: s.name,
-    icon: s.icon,
-    description: s.desc,
-    desc: s.desc,
-    category: 'custom',
-    code: '',
-    readme: '',
-    authorName: 'AgentHub 官方',
-    isPublished: true,
-    isMine: false,
-    isInstalled: true,
-    isBuiltin: true,
-    installCount: 9999,
-    versions: [],
-  }));
-}
-
+// 合并所有技能（去重），提供给 Skills 页面使用
 function normalizedCustomSkills() {
-  return (state.customSkills || []).map(s => ({
+  const builtin = (BUILTIN_SKILLS || []).map(s => buildLocalSkillRecord(s, {
     ...s,
     slug: s.slug || s.id,
-    id: s.id || s.slug,
-    desc: s.desc || s.description || "",
-    description: s.description || s.desc || "",
-    isMine: true,
-    isPublished: false,
+    isBuiltin: true,
     isInstalled: true,
-    isBuiltin: false,
-    isLocalCustom: true,
-    versions: s.versions || [],
+    isPublished: true,
+    authorName: 'system',
   }));
+  const custom = (state.customSkills || []).map(s => buildLocalSkillRecord(s, {
+    ...s,
+    slug: s.slug || s.id,
+    isBuiltin: false,
+    isInstalled: true,
+    isMine: true,
+  }));
+  // 去重：以 slug 为键
+  const map = new Map();
+  [...builtin, ...custom].forEach(s => map.set(s.slug, s));
+  return [...map.values()];
 }
 
 function getAllSkillRecords() {
-  return [...normalizedBuiltinSkills(), ...normalizedCustomSkills(), ...(state.skills.mine || []), ...(state.skills.market || [])];
+  return [...normalizedCustomSkills(), ...(state.skills.mine || []), ...(state.skills.market || [])];
 }
 
 function findSkillRecord(skillRef) {
@@ -3091,7 +3065,7 @@ function getAllSkills() {
   const fromCustom = normalizedCustomSkills().map(s => ({ id: s.slug, name: s.name, icon: s.icon, desc: s.description }));
   // 去重：以 slug/id 为键
   const map = new Map();
-  [...BUILTIN_SKILLS, ...fromMine, ...fromCustom].forEach(s => map.set(s.id, s));
+  [...fromMine, ...fromCustom].forEach(s => map.set(s.id, s));
   return [...map.values()];
 }
 
@@ -3119,12 +3093,15 @@ function renderSkillsPage() {
 
   const tab = state.skillsTab || 'mine';
 
-  // 我的 Skill = 内置（系统提供） + 服务器 mine
-  const builtins = normalizedBuiltinSkills();
+  // 我的 Skill = 内置（系统提供） + 服务器 mine + 市场中系统内置的 skill
   const mineFromServer = state.skills.mine || [];
   const localCustoms = normalizedCustomSkills();
-  const myList = [...builtins, ...localCustoms, ...mineFromServer];
-  const marketList = state.skills.market || [];
+  const marketList = (state.skills.market || []).filter(s => s.authorName !== 'system');
+  // 将市场中系统内置（authorName === system）的技能也加入"我的 Skill"，标记为只读
+  const builtinInMarket = (state.skills.market || [])
+    .filter(s => s.authorName === 'system')
+    .map(s => ({ ...s, isBuiltin: true, isInstalled: true }));
+  const myList = [...localCustoms, ...mineFromServer, ...builtinInMarket];
 
   const counts = `
     <div class="flex items-center gap-2">
@@ -4520,9 +4497,47 @@ function getMyLibraryAgents(currentMissionId, excludeIds, query, manager) {
       });
     });
   });
+  // 加上后端自建 Agent（customAgents）
+  (state.customAgents || []).forEach(a => {
+    const agentKey = a.agent_id || `backend_${a.id}`;
+    if (excludeIds.has(agentKey)) return;
+    if (seenName.has(a.name)) return;
+    seenName.add(a.name);
+    out.push({
+      id: agentKey,
+      name: a.name,
+      role: a.description || a.system_prompt || '',
+      icon: a.icon || 'smart_toy',
+      skills: a.tools || [],
+      kind: 'agent',
+      model: a.llm_adapter || 'GPT-4o mini',
+      fromCustomAgent: true,
+      _score: scoreAgentMatch(manager, { name: a.name, role: a.description || '', skills: a.tools || [] }, query),
+    });
+  });
   // 搜索过滤
   const filtered = query ? out.filter(x => agentMatchesQuery(x, query)) : out;
   return filtered.sort((x, y) => y._score - x._score);
+}
+
+// 从后端自定义 Agent 库添加（被添加 Agent 弹窗调用）
+function addAgentFromCustomAgent(customAgentId, dstMissionId) {
+  const dst = state.missions.find(x => x.id === dstMissionId);
+  const src = (state.customAgents || []).find(a => String(a.agent_id || a.id) === String(customAgentId));
+  if (!dst || !src) return;
+  const newAgent = cloneAgentForMission({
+    name: src.name,
+    role: src.description || src.system_prompt || '',
+    icon: src.icon || 'smart_toy',
+    skills: src.tools || [],
+    model: src.llm_adapter || 'GPT-4o mini',
+    kind: 'agent'
+  }, dst);
+  const { intent } = _insertAgentToMission(newAgent, dst);
+  closeModalAddAgent();
+  showToast(`已添加 "${newAgent.name}" 到 Team`, 'success');
+  if (intent) setTimeout(() => { state.missionId = dst.id; openModalAgentDiff(intent); }, 100);
+  else render();
 }
 
 function getRecommendedAgents(manager, excludeIds, query) {
@@ -6781,25 +6796,39 @@ function parseMentions(text) {
   m.squad.agents.forEach(a => {
     if (text.includes('@' + a.name)) out.push(a);
   });
+  // 也检查自建 Agent（数据库中的自定义 Agent）
+  (state.customAgents || []).forEach(a => {
+    if (text.includes('@' + a.name) && !out.some(x => x.name === a.name)) {
+      out.push({ ...a, role: a.description || a.system_prompt || '', skills: a.tools || [] });
+    }
+  });
   return out;
 }
 
 function simulateGroupChat(text, mentioned) {
   const run = getRun();
-  // 顺序回复 + Coordinator 总结
-  const replies = mentioned.map((a,i) => ({
-    delay: 600 + i*900,
-    msg: {
-      type:'agent', agent:a.name, icon:a.icon, time: now(),
-      text: agentReplyMock(a, text, i)
+  const m = getMission();
+  const names = mentioned.map(x => x.name).join(', ');
+  let waitReply = `已收到，正在向 @${names} 发起请求...`;
+  run.conversation.push({ type:'agent', agent:'orchestrator', icon:'hub', time: now(), text: waitReply });
+  render();
+  (async () => {
+    try {
+      // 不传 agent，由后端 orchestrator 解析 @ 并路由
+      const response = await api('/chat', {
+        method: 'POST',
+        body: JSON.stringify({ message: text, mission: m })
+      });
+      if (response.ok && response.reply) {
+        run.conversation.pop();
+        run.conversation.push({ type:'agent', agent:'orchestrator', icon:'hub', time: now(), text: response.reply });
+      }
+    } catch (error) {
+      run.conversation.pop();
+      run.conversation.push({ type:'agent', agent:'orchestrator', icon:'hub', time: now(), text: '抱歉，调用后端处理 @ 请求时出错了：' + error.message });
     }
-  }));
-  replies.push({
-    delay: 600 + mentioned.length*900 + 600,
-    msg: { type:'agent', agent:'Coordinator', icon:'switch_account', time: now(),
-      text:`已收到 ${mentioned.length} 位 Agent 的输出。我将整合并产出统一交付物。`}
-  });
-  replies.forEach(r => setTimeout(() => { run.conversation.push(r.msg); render(); }, r.delay));
+    render();
+  })();
 }
 
 function agentReplyMock(a, userText, idx) {
@@ -6908,21 +6937,40 @@ function sendChat() {
     return;
   }
 
-  // 3) 默认：第一个 Agent 模拟回复（如有 RAG 命中追加引用）
+  // 3) 默认：调用后端API处理请求
   render();
-  setTimeout(() => {
-    const m = getMission();
-    const a = m.squad.agents[0];
-    if (a) {
-      let reply = '已收到。我会基于当前班底配置开始处理这个请求。';
-      if (autoHits && autoHits.length) {
-        const docs = [...new Set(autoHits.map(h => h.docName))];
-        reply += `\n\n（已参考：${docs.join('，')}）`;
+  const m = getMission();
+  const a = m.squad.agents[0];
+  const targetAgent = a || { name:'orchestrator', icon:'hub', id:'orchestrator' };
+  // 先显示收到消息的提示
+  let waitReply = a ? '已收到。正在调用后端AI处理您的请求...' : '已收到。将交由 Orchestrator 处理...';
+  run.conversation.push({ type:'agent', agent:targetAgent.name, icon:targetAgent.icon, time: now(), text: waitReply });
+  render();
+  
+  // 调用后端聊天接口
+  (async () => {
+    try {
+      const response = await api('/chat', {
+        method: 'POST',
+        body: JSON.stringify({
+          message: text,
+          agent: targetAgent,
+          mission: m
+        })
+      });
+      
+      if (response.ok && response.reply) {
+        // 移除等待消息，添加真正的回复
+        run.conversation.pop();
+        run.conversation.push({ type:'agent', agent:targetAgent.name, icon:targetAgent.icon, time: now(), text: response.reply });
       }
-      run.conversation.push({ type:'agent', agent:a.name, icon:a.icon, time: now(), text: reply });
-      render();
+    } catch (error) {
+      // API调用失败，显示错误信息
+      run.conversation.pop();
+      run.conversation.push({ type:'agent', agent:targetAgent.name, icon:targetAgent.icon, time: now(), text: '抱歉，调用后端API时出错了：' + error.message });
     }
-  }, 700);
+    render();
+  })();
 }
 
 /* ---- New Run（并发，不归档旧 Run） ---- */
@@ -6957,7 +7005,7 @@ function manualSaveQuickRun() {
 
 /* ===================== 验收自检（控制台） ===================== */
 /* ===================== Auth · 前后端集成 ===================== */
-const API_BASE = '/api';
+const API_BASE = 'http://localhost:8000/api';
 
 async function api(path, init = {}) {
   const headers = Object.assign(
@@ -6970,33 +7018,285 @@ async function api(path, init = {}) {
   let data = null;
   try { data = await res.json(); } catch(e) {}
   if (!res.ok) {
+    // 401 → token 失效，自动清除登录状态
+    if (res.status === 401 && localStorage.getItem('agenthub_token')) {
+      localStorage.removeItem('agenthub_token');
+      state.user = null;
+      render();
+      showToast('登录已过期，请重新登录', 'error');
+      throw new Error('登录已过期，请重新登录');
+    }
     const msg = (data && data.error) || ('HTTP ' + res.status);
     throw new Error(msg);
   }
   return data;
 }
 
-async function bootstrapAuth() {
-  // 启动时尝试用 localStorage 里的 token 拉取 me
-  const token = localStorage.getItem('agenthub_token');
-  if (!token) {
-    // 游客也加载 market（公开访问）
-    loadSkills();
+/* ===== Agent CRUD API ===== */
+async function fetchCustomAgents() {
+  try {
+    const res = await api('/agents');
+    state.customAgents = Array.isArray(res) ? res : [];
+    render();
+  } catch (e) {
+    console.error('获取自定义Agent列表失败:', e);
+    state.customAgents = [];
+  }
+}
+
+async function createCustomAgentAPI(name, icon, systemPrompt, llmAdapter, tools) {
+  const res = await api('/agents', {
+    method: 'POST',
+    body: JSON.stringify({ name, icon: icon || 'smart_toy', description: '', system_prompt: systemPrompt, llm_adapter: llmAdapter, tools: tools || [] })
+  });
+  await fetchCustomAgents();
+  showToast(`自定义Agent "${name}" 创建成功`, 'success');
+  return res;
+}
+
+async function deleteCustomAgentAPI(agentId, name) {
+  if (!confirm(`确定删除自定义Agent "${name}"？此操作不可恢复。`)) return;
+  try {
+    await api(`/agents/${agentId}`, { method: 'DELETE' });
+    showToast(`已删除 "${name}"`, 'success');
+    await fetchCustomAgents();
+  } catch (e) {
+    showToast(`删除失败: ${e.message}`, 'error');
+  }
+}
+
+async function updateCustomAgentAPI(agentId, data) {
+  try {
+    await api(`/agents/${agentId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data)
+    });
+    showToast('Agent 更新成功', 'success');
+    await fetchCustomAgents();
+  } catch (e) {
+    showToast(`更新失败: ${e.message}`, 'error');
+  }
+}
+
+function openEditCustomAgentModal(agentId) {
+  const agent = (state.customAgents || []).find(a => String(a.agent_id || a.id) === String(agentId));
+  if (!agent) {
+    showToast('未找到该 Agent 数据', 'error');
     return;
   }
+  state.editingAgent = agent;
+  const root = $('#modal-edit-agent');
+  root.classList.remove('hidden');
+  renderEditCustomAgentModal();
+}
+
+function closeEditCustomAgentModal() {
+  state.editingAgent = null;
+  closeModal('modal-edit-agent');
+}
+
+function renderEditCustomAgentModal() {
+  const agent = state.editingAgent;
+  if (!agent) return;
+  const root = $('#modal-edit-agent');
+  const name = agent.name || '';
+  const model = (agent.llm_adapter || agent.model || 'tongyi').replace(/"/g, '&quot;');
+  const sysPrompt = (agent.systemPrompt || agent.system_prompt || '').replace(/"/g, '&quot;');
+  const tools = (agent.tools || agent.skills || []).join(', ');
+  root.innerHTML = `
+    <div class="absolute inset-0 bg-black/40" onclick="closeEditCustomAgentModal()"></div>
+    <div class="absolute inset-0 flex items-center justify-center p-4">
+      <div class="bg-surface-container-high rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+        <div class="flex items-center justify-between p-4 pb-0">
+          <h3 class="text-title-md text-on-surface">编辑自定义Agent</h3>
+          <button onclick="closeEditCustomAgentModal()" class="p-1 rounded hover:bg-surface-container">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+        <div class="p-4 space-y-4">
+          <div>
+            <label class="text-label-sm text-secondary block mb-1">名称</label>
+            <input id="edit-agent-name" type="text" value="${escapeAttr(name)}"
+              class="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-on-surface text-body-md focus:outline-none focus:border-primary">
+          </div>
+          <div>
+            <label class="text-label-sm text-secondary block mb-1">模型适配器（llm_adapter）</label>
+            <input id="edit-agent-model" type="text" value="${escapeAttr(model)}"
+              class="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-on-surface text-body-md focus:outline-none focus:border-primary">
+          </div>
+          <div>
+            <label class="text-label-sm text-secondary block mb-1">系统提示词</label>
+            <textarea id="edit-agent-prompt" rows="4"
+              class="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-on-surface text-body-md focus:outline-none focus:border-primary">${sysPrompt}</textarea>
+          </div>
+          <div>
+            <label class="text-label-sm text-secondary block mb-1">工具/技能列表（逗号分隔）</label>
+            <input id="edit-agent-tools" type="text" value="${escapeAttr(tools)}"
+              class="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-on-surface text-body-md focus:outline-none focus:border-primary">
+          </div>
+        </div>
+        <div class="flex items-center justify-end gap-3 p-4 pt-0">
+          <button onclick="closeEditCustomAgentModal()" class="px-3 py-1.5 text-secondary text-label-md hover:underline">取消</button>
+          <button onclick="saveEditCustomAgent()" class="px-4 py-1.5 bg-primary text-white rounded-lg text-label-md hover:bg-primary/90 transition-colors">保存</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function saveEditCustomAgent() {
+  const agent = state.editingAgent;
+  if (!agent) return;
+  const agentId = agent.agent_id || agent.id;
+  const data = {
+    name: $('#edit-agent-name').value.trim(),
+    llm_adapter: $('#edit-agent-model').value.trim(),
+    system_prompt: $('#edit-agent-prompt').value.trim(),
+    tools: $('#edit-agent-tools').value.split(',').map(s => s.trim()).filter(Boolean),
+  };
+  if (!data.name) { showToast('名称不能为空', 'error'); return; }
+  closeEditCustomAgentModal();
+  updateCustomAgentAPI(agentId, data);
+}
+
+async function updateCustomAgentAPI(agentId, data) {
   try {
-    const r = await api('/me');
-    if (r && r.ok) {
-      state.user = r.user;
-      loadSkills();
-      render();
-      return;
-    }
+    await api(`/agents/${agentId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data)
+    });
+    showToast('Agent 更新成功', 'success');
+    await fetchCustomAgents();
   } catch (e) {
-    // token 失效 → 清掉
-    localStorage.removeItem('agenthub_token');
+    showToast(`更新失败: ${e.message}`, 'error');
   }
-  loadSkills();
+}
+
+function openEditCustomAgentModal(agentId) {
+  const agent = (state.customAgents || []).find(a => String(a.agent_id || a.id) === String(agentId));
+  if (!agent) {
+    showToast('未找到该 Agent 数据', 'error');
+    return;
+  }
+  state.editingAgent = agent;
+  const root = $('#modal-edit-agent');
+  root.classList.remove('hidden');
+  renderEditCustomAgentModal();
+}
+
+function closeEditCustomAgentModal() {
+  state.editingAgent = null;
+  closeModal('modal-edit-agent');
+}
+
+function renderEditCustomAgentModal() {
+  const agent = state.editingAgent;
+  if (!agent) return;
+  const root = $('#modal-edit-agent');
+  const name = agent.name || '';
+  const icon = agent.icon || 'smart_toy';
+  const desc = agent.description || '';
+  const model = agent.model || 'qwen-plus';
+  const sysPrompt = (agent.systemPrompt || agent.system_prompt || '').replace(/"/g, '&quot;');
+  const skills = (agent.skills || (agent.tools || [])).join(', ');
+  root.innerHTML = `
+    <div class="absolute inset-0 bg-black/40" onclick="closeEditCustomAgentModal()"></div>
+    <div class="absolute inset-0 flex items-center justify-center p-4">
+      <div class="bg-surface-container-high rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto" onclick="event.stopPropagation()">
+        <div class="flex items-center justify-between p-4 pb-0">
+          <h3 class="text-title-md text-on-surface">编辑自定义Agent</h3>
+          <button onclick="closeEditCustomAgentModal()" class="p-1 rounded hover:bg-surface-container">
+            <span class="material-symbols-outlined">close</span>
+          </button>
+        </div>
+        <div class="p-4 space-y-4">
+          <div>
+            <label class="text-label-sm text-secondary block mb-1">名称</label>
+            <input id="edit-agent-name" type="text" value="${escapeAttr(name)}"
+              class="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-on-surface text-body-md focus:outline-none focus:border-primary">
+          </div>
+          <div>
+            <label class="text-label-sm text-secondary block mb-1">图标（Material Symbols 名称）</label>
+            <input id="edit-agent-icon" type="text" value="${escapeAttr(icon)}"
+              class="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-on-surface text-body-md focus:outline-none focus:border-primary">
+          </div>
+          <div>
+            <label class="text-label-sm text-secondary block mb-1">描述</label>
+            <input id="edit-agent-desc" type="text" value="${escapeAttr(desc)}"
+              class="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-on-surface text-body-md focus:outline-none focus:border-primary">
+          </div>
+          <div>
+            <label class="text-label-sm text-secondary block mb-1">模型</label>
+            <input id="edit-agent-model" type="text" value="${escapeAttr(model)}"
+              class="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-on-surface text-body-md focus:outline-none focus:border-primary">
+          </div>
+          <div>
+            <label class="text-label-sm text-secondary block mb-1">系统提示词</label>
+            <textarea id="edit-agent-prompt" rows="4"
+              class="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-on-surface text-body-md focus:outline-none focus:border-primary">${sysPrompt}</textarea>
+          </div>
+          <div>
+            <label class="text-label-sm text-secondary block mb-1">技能（逗号分隔）</label>
+            <input id="edit-agent-skills" type="text" value="${escapeAttr(skills)}"
+              class="w-full px-3 py-2 rounded-lg bg-surface-container border border-outline-variant text-on-surface text-body-md focus:outline-none focus:border-primary">
+          </div>
+        </div>
+        <div class="flex items-center justify-end gap-3 p-4 pt-0">
+          <button onclick="closeEditCustomAgentModal()" class="px-3 py-1.5 text-secondary text-label-md hover:underline">取消</button>
+          <button onclick="saveEditCustomAgent()" class="px-4 py-1.5 bg-primary text-white rounded-lg text-label-md hover:bg-primary/90 transition-colors">保存</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function saveEditCustomAgent() {
+  const agent = state.editingAgent;
+  if (!agent) return;
+  const agentId = agent.agent_id || agent.id;
+  const data = {
+    name: $('#edit-agent-name').value.trim(),
+    icon: $('#edit-agent-icon').value.trim(),
+    description: $('#edit-agent-desc').value.trim(),
+    model: $('#edit-agent-model').value.trim(),
+    system_prompt: $('#edit-agent-prompt').value.trim(),
+    skills: $('#edit-agent-skills').value.split(',').map(s => s.trim()).filter(Boolean),
+  };
+  if (!data.name) { showToast('名称不能为空', 'error'); return; }
+  closeEditCustomAgentModal();
+  updateCustomAgentAPI(agentId, data);
+}
+
+async function bootstrapAuth() {
+  // 先渲染空状态，避免页面白屏
+  render();
+  
+  // 从后端加载 missions
+  try {
+    const missionsRes = await api('/missions');
+    if (missionsRes && missionsRes.ok && missionsRes.missions && missionsRes.missions.length > 0) {
+      state.missions = missionsRes.missions;
+      state.missionId = state.missions[0].id;
+      render();
+    }
+  } catch (err) {
+    console.error('[MISSIONS] 加载失败:', err);
+  }
+    
+    // 加载用户信息
+    const token = localStorage.getItem('agenthub_token');
+    if (token) {
+      try {
+        const r = await api('/me');
+        if (r && r.ok) {
+          state.user = r.user;
+          render();
+        }
+      } catch(e) {
+        localStorage.removeItem('agenthub_token');
+        render();
+      }
+    }
+    loadSkills();
+    fetchCustomAgents();
 }
 
 function openAuthModal(tab='register') {
@@ -7148,32 +7448,12 @@ function logout() {
 /* ===================== 验收自检（控制台） ===================== */
 window.__verifyChecklist = function() {
   const checks = [
-    ['Dashboard 渲染了 Mission 卡片', () => state.missions.length >= 3],
-    ['内置 Skill ≥ 10', () => BUILTIN_SKILLS.length >= 10],
-    ['模板 = 6', () => TEMPLATES.length === 6],
+    ['后端 missions 已加载', () => state.missions.length >= 0],
+    ['后端 skills 已加载', () => state.skills.loaded],
+    ['认证状态正常', () => state.user === null || (state.user && state.user.id)],
     ['Mission 工作台有当前 Run', () => !!getRun()],
-    ['Mission 支持多个并发 Run', () => getMission('mis_fin').runs.length >= 2 && getMission('mis_fin').runs.every(r => r.status !== 'archived')],
-    ['编辑意图解析正常', () => !!parseEditIntent('给 Financial Analyst 加 web_search 技能')],
-    ['@ 多 Agent 解析', () => parseMentions('@Financial Analyst @Report Writer 一起想想').length === 2],
-    ['Team 默认包含所有 Agents', () => {
-      const m = getMission('mis_fin');
-      const mgr = m && m.squad.agents.find(x => x.kind === 'team');
-      return !!mgr && Array.isArray(mgr.teamMemberIds) && mgr.teamMemberIds.length === m.squad.agents.length - 1;
-    }],
-    ['parseEditIntentGlobal 跨 Mission 命中', () => !!parseEditIntentGlobal('给 Financial Analyst 加 web_search 技能')],
-    ['agentMarket mock 已就绪', () => Array.isArray(state.agentMarket) && state.agentMarket.length >= 5],
-    ['buildManagerSyncPromptDiff 输出标准 intent', () => {
-      const m = getMission('mis_fin');
-      const mgr = m.squad.agents.find(x => x.kind === 'team');
-      const newMember = m.squad.agents.find(x => x.id !== mgr.id);
-      const intent = buildManagerSyncPromptDiff(mgr, newMember, m);
-      return !!intent && Array.isArray(intent.promptDiff) && intent.promptDiff.length > 0 && typeof intent.summary === 'string';
-    }],
-    ['Financial Analyst 是 mis_fin 的 Team', () => {
-      const m = getMission('mis_fin');
-      const mgr = m && m.squad.agents.find(x => x.kind === 'team');
-      return !!mgr && mgr.name === 'Financial Analyst';
-    }],
+    ['@ 多 Agent 解析', () => parseMentions('@Agent1 @Agent2 一起想想').length === 2],
+    ['编辑意图解析正常', () => !!parseEditIntent('给默认助手加 web_search 技能')],
     ['详情页 NL 面板渲染（team tab=overview）', () => {
       const m = getMission('mis_fin');
       const mgr = m.squad.agents.find(x => x.kind === 'team');

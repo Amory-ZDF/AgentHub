@@ -1,4 +1,6 @@
 from typing import Dict, Any, TypedDict, List
+from backend.models.task_spec import TaskSpec
+from backend.models.task_spec import TaskResult
 from langchain_core.messages import BaseMessage
 
 
@@ -13,6 +15,9 @@ class GraphState(TypedDict):
     # Planner 生成的原始计划
     plan_data: Dict[str, Any]
 
+    tasks: List[TaskSpec]
+
+    step_id: TaskResult
 
     # 按步骤编号存储的执行结果
     # 例如: {1: "代码生成结果...", 2: "代码审查结果..."}
@@ -32,3 +37,7 @@ class GraphState(TypedDict):
 
     # 用于存放 AI 对话历史的压缩摘要，供后续任务参考
     memory_summary: str
+
+    plan_iteration: int
+
+    shared_workspace: dict

@@ -43,6 +43,32 @@ db.exec(`
     FOREIGN KEY (user_id)  REFERENCES users(id)  ON DELETE CASCADE,
     FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS agents (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug          TEXT    NOT NULL UNIQUE,
+    name          TEXT    NOT NULL,
+    icon          TEXT    NOT NULL DEFAULT 'bot',
+    description   TEXT    NOT NULL DEFAULT '',
+    model         TEXT    NOT NULL DEFAULT 'qwen-plus',
+    system_prompt TEXT    NOT NULL DEFAULT '',
+    skills        TEXT    NOT NULL DEFAULT '[]',
+    author_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    author_name   TEXT    NOT NULL DEFAULT 'system',
+    is_public     INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS conversations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    title         TEXT    NOT NULL DEFAULT '新对话',
+    user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    agent_id       INTEGER REFERENCES agents(id) ON DELETE SET NULL,
+    messages      TEXT    NOT NULL DEFAULT '[]',
+    created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 // 兼容旧库：尝试 ALTER 增字段（已存在则忽略）

@@ -13,7 +13,7 @@ class CustomAgent(BaseAgent):
     这个类本身不包含任何具体的业务逻辑，它只负责根据配置调用 LLM。
     """
 
-    def __init__(self, agent_id: str, system_prompt: str, llm_adapter: BaseAgent):
+    def __init__(self, agent_id: str, system_prompt: str, llm_adapter: BaseAgent, name: str = None):
         """
         初始化 CustomAgent。
 
@@ -21,11 +21,13 @@ class CustomAgent(BaseAgent):
             agent_id: 此自定义 Agent 的唯一标识符。
             system_prompt: 定义此 Agent 角色和行为的系统提示词。
             llm_adapter: 一个具体的 LLM 适配器实例 (如 DeepSeekAdapter), 用于实际调用 LLM。
+            name: 可选，显示名称；不传时默认等于 agent_id。
         """
         super().__init__(agent_id)
+        self.name = name or agent_id
         self.system_prompt = system_prompt
         self.llm_adapter = llm_adapter
-        logger.info(f"通用 Agent '{self.agent_id}' 已创建，使用适配器: {self.llm_adapter.__class__.__name__}")
+        logger.info(f"通用 Agent '{self.agent_id}' 已创建（名称: {self.name}），使用适配器: {self.llm_adapter.__class__.__name__}")
 
     async def process(self, messages: List[Message], context: Dict[str, Any] = None) -> Message:
         # 为满足抽象类要求提供的最小化实现
