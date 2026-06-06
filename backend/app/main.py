@@ -51,6 +51,15 @@ async def lifespan(app: FastAPI):
                 conn.execute(text("ALTER TABLE custom_agents ADD COLUMN description VARCHAR DEFAULT ''"))
                 conn.commit()
                 logger.info("✅ 已添加缺失列: custom_agents.description")
+        # A 档：检查 custom_agents 表是否有 memory_config / planning_config / validation_config 列
+        # SQLite 的 create_all 不会给已有表加新列，需要手动 ALTER
+        for col_name in ('memory_config', 'planning_config', 'validation_config'):
+            if col_name not in ca_columns:
+                with engine.connect() as conn:
+                    # SQLite JSON 列实际上以 TEXT 形式存储，SQLAlchemy 读写时会做 JSON 序列化
+                    conn.execute(text(f"ALTER TABLE custom_agents ADD COLUMN {col_name} JSON DEFAULT NULL"))
+                    conn.commit()
+                    logger.info(f"✅ 已添加缺失列: custom_agents.{col_name}")
         # 检查 custom_agents 表是否有 user_id 列
         if 'user_id' not in ca_columns:
             with engine.connect() as conn:

@@ -55,6 +55,10 @@ class CustomAgent(BaseModel):
     system_prompt: str
     llm_adapter: str
     tools: list[str] = []
+    # A 档新增：3 类配置字段（前端 GET 详情时读取）
+    memory_config: Optional[dict] = None
+    planning_config: Optional[dict] = None
+    validation_config: Optional[dict] = None
     created_at: datetime
     is_active: bool
 
@@ -63,13 +67,17 @@ class CustomAgent(BaseModel):
 
 
 class CustomAgentCreate(BaseModel):
-    """用于创建自定义Agent的Schema"""
+    """用于创建/更新自定义Agent的Schema"""
     name: str
     icon: str = "smart_toy"
     description: str = ""
     system_prompt: str
     llm_adapter: str = "tongyi"
     tools: list[str] = []
+    # A 档新增：3 类配置字段（前端保存详情时写入）
+    memory_config: Optional[dict] = None
+    planning_config: Optional[dict] = None
+    validation_config: Optional[dict] = None
 
 
 class ArtifactSchema(BaseModel):

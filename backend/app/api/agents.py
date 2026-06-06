@@ -7,6 +7,11 @@ from backend.app.api.auth import get_current_user, try_get_current_user
 from backend.models.user import User as UserModel
 from backend.core.orchestrator import Orchestrator
 from backend.utils.logger import logger
+from backend.utils.agent_config import (
+    normalize_memory_config,
+    normalize_planning_config,
+    normalize_validation_config,
+)
 import uuid
 from typing import Optional
 
@@ -61,6 +66,13 @@ async def create_agent(req: CustomAgentCreate, db: Session = Depends(get_db), cu
         final_name = req.name
     
     agent_id = f"custom_{final_name.replace(' ', '_').lower()}_{uuid.uuid4().hex[:6]}"
+    # A 档：归一化 3 类配置字段，非法值返回 422
+    try:
+        memory_cfg = normalize_memory_config(req.memory_config)
+        planning_cfg = normalize_planning_config(req.planning_config)
+        validation_cfg = normalize_validation_config(req.validation_config)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     db_agent = CustomAgentModel(
         name=final_name,
         agent_id=agent_id,
@@ -69,7 +81,10 @@ async def create_agent(req: CustomAgentCreate, db: Session = Depends(get_db), cu
         description=req.description or "",
         system_prompt=req.system_prompt,
         llm_adapter=req.llm_adapter,
-        tools=req.tools
+        tools=req.tools,
+        memory_config=memory_cfg,
+        planning_config=planning_cfg,
+        validation_config=validation_cfg,
     )
     db.add(db_agent)
     db.commit()
@@ -93,6 +108,13 @@ async def update_agent(agent_id: str, req: CustomAgentCreate, db: Session = Depe
     db_agent.system_prompt = req.system_prompt
     db_agent.llm_adapter = req.llm_adapter
     db_agent.tools = req.tools
+    # A 档：归一化并持久化 3 类配置字段
+    try:
+        db_agent.memory_config = normalize_memory_config(req.memory_config)
+        db_agent.planning_config = normalize_planning_config(req.planning_config)
+        db_agent.validation_config = normalize_validation_config(req.validation_config)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     db.commit()
     db.refresh(db_agent)
     orchestrator.register_custom_agent(db_agent)
