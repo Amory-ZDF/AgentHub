@@ -1,43 +1,87 @@
 import os
 import requests
-from typing import List, Dict, Any
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def web_search(query: str) -> str:
     """
     联网搜索互联网上的最新信息，输入搜索关键词，返回搜索结果的摘要。
     当你需要查询最新资讯、技术文档、实时数据，或者自身知识无法回答的问题时调用这个工具。
-    
+
     Args:
         query: 搜索关键词，必须是字符串
-        
+
     Returns:
         搜索结果的文本摘要
     """
-    # 使用百度的联网搜索API，读取.env里配置的WEBSEARCH_API_KEY
+    logger.info(f"[web_search] 被调用，query='{query}'")
+
     api_key = os.getenv("WEBSEARCH_API_KEY")
     if not api_key:
-        return "错误：未配置WEBSEARCH_API_KEY环境变量，无法执行联网搜索，请先在.env中配置百度搜索API密钥"
-    
+        logger.error("[web_search] WEBSEARCH_API_KEY 未配置")
+        return "错误：未配置 WEBSEARCH_API_KEY"
+
+    logger.info(f"[web_search] API_KEY 前缀: {api_key[:20]}...")
+
+    payload = {
+        "messages": [{"role": "user", "content": query}],
+        "stream": False,
+        "model": "ernie-3.5-8k",
+        "instruction": "##",
+        "enable_corner_markers": True,
+        "enable_deep_search": True,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    logger.info(f"[web_search] 请求 URL: https://qianfan.baidubce.com/v2/ai_search/chat/completions")
+    logger.info(f"[web_search] 请求头: {{'Authorization': 'Bearer {api_key[:8]}...', 'Content-Type': 'application/json'}}")
+    logger.info(f"[web_search] 请求体: {json.dumps(payload, ensure_ascii=False)[:200]}...")
+
     try:
-        # 调用百度的搜索API（根据你实际用的百度API地址调整，这里用通用的百度搜索接口格式）
-        response = requests.get(
-            "https://api.baidu.com/search",  # 替换为你实际的百度搜索API地址
-            params={"q": query, "apikey": api_key, "limit": 3}
+        resp = requests.post(
+            "https://qianfan.baidubce.com/v2/ai_search/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=90
         )
-        if response.status_code == 200:
-            data = response.json()
-            # 适配百度API的返回格式，提取前3个搜索结果
-            results = data.get("results", [])[:3]
-            if not results:
-                return f"未找到与'{query}'相关的有效搜索结果"
-            summary = f"🔍 联网搜索'{query}'的结果：\n"
-            for i, res in enumerate(results, 1):
-                title = res.get('title', '无标题')
-                snippet = res.get('summary', '无摘要')
-                link = res.get('url', '#')
-                summary += f"{i}. {title}\n   📝 {snippet}\n   🔗 {link}\n"
-            return summary
+        logger.info(f"[web_search] HTTP 响应状态码: {resp.status_code}")
+        logger.info(f"[web_search] HTTP 响应头: {dict(resp.headers)}")
+
+        if resp.status_code != 200:
+            error_text = resp.text[:500]
+            logger.error(f"[web_search] API 返回错误: {error_text}")
+            return f"搜索API HTTP {resp.status_code}: {error_text}"
+
+        data = resp.json()
+        logger.info(f"[web_search] 响应 JSON 根字段: {list(data.keys())}")
+
+        # 兼容两种返回格式
+        result = data.get("result", "")
+        if not result:
+            choices = data.get("choices", [])
+            if choices:
+                result = choices[0].get("message", {}).get("content", "")
+                logger.info(f"[web_search] 从 choices[0].message.content 提取结果，长度: {len(result)}")
+            else:
+                logger.warning(f"[web_search] choices 为空，完整响应: {json.dumps(data, ensure_ascii=False)[:500]}")
         else:
-            return f"搜索API调用失败，HTTP状态码: {response.status_code}，响应: {response.text[:200]}"
+            logger.info(f"[web_search] 从 result 字段提取结果，长度: {len(result)}")
+
+        if not result:
+            logger.warning("[web_search] API 返回空结果")
+            return f"搜索API返回空结果"
+
+        logger.info(f"[web_search] 搜索成功，结果长度: {len(result)}")
+        return f"🔍 搜索结果（{query}）：\n{result}"
+
+    except requests.Timeout:
+        logger.error("[web_search] 请求超时（30秒）")
+        return "搜索API请求超时（30秒）"
     except Exception as e:
-        return f"联网搜索执行失败，异常信息: {str(e)}"
+        logger.error(f"[web_search] 请求异常: {e}", exc_info=True)
+        return f"搜索失败: {e}"

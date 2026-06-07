@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 import re
 import os
 import importlib
@@ -63,11 +62,11 @@ class Orchestrator:
         self.langchain_tools: List[Any] = []
 
         # 🎯 优化后的初始化顺序：先核心，后业务
-        # 1. 先注册所有核心Agent
-        self._setup_agents()
-        # 2. 加载所有Skill（能力类+工具类）
+        # 1. 先加载所有Skill（工具类），这样注册Agent时 langchain_tools 已就绪
         self._load_native_skills()
         self._register_builtin_tool_skills()
+        # 2. 再注册所有核心Agent（此时已有工具，可以创建ReAct执行器）
+        self._setup_agents()
         # 3. 注册所有工作流（内置+自定义）
         self._register_builtin_workflows()
         self._register_workflows()
@@ -99,9 +98,12 @@ class Orchestrator:
 
     def get_available_skills_prompt(self) -> str:
         """统一生成所有可用技能的自然语言描述，供planner和所有子agent使用"""
-        # 处理能力类Skill（md文件）
+        # 处理能力类Skill（md文件），但跳过已经有对应工具类Skill的（避免 ReAct Action: 格式和 SKILL_CALL: 格式冲突）
         native_skills_desc = []
         for skill_name, skill_content in self.native_skills.items():
+            if skill_name in self.tool_skills:
+                logger.debug(f"跳过能力类Skill '{skill_name}'，已有对应的工具类Skill，由ReAct执行器管理")
+                continue
             try:
                 # 从md文件中提取关键信息
                 name_part = skill_content.split("## 技能名称：")
@@ -342,6 +344,60 @@ class Orchestrator:
             logger.info(f"[VERIFY] 工作流/技能选择：普通聊天，路由到默认对话Agent")
             return await self._handle_default_chat(conversation_id, messages)
 
+    async def _call_agent_with_tools(
+        self,
+        agent: Any,
+        prompt: str = None,
+        messages: list = None,
+        conversation_id: str = None
+    ) -> str:
+        """
+        统一 Agent 调用入口。
+        优先使用 ReAct 执行器（支持工具调用），降级为 process_message。
+        所有调用 Agent 的路径必须走此方法，确保工具调用永不被遗漏。
+        """
+        from backend.models.message import Message
+        from datetime import datetime
+
+        # —— 优先使用 ReAct 执行器 ——
+        if hasattr(agent, 'executor'):
+            if prompt is None and messages:
+                lines = []
+                for m in messages:
+                    if isinstance(m, dict):
+                        lines.append(f"{m.get('role', 'user')}: {m.get('content', '')}")
+                    elif hasattr(m, 'role') and hasattr(m, 'content'):
+                        lines.append(f"{m.role}: {m.content}")
+                    elif hasattr(m, 'agent_id') and hasattr(m, 'content'):
+                        role = "user" if m.agent_id == "user" else "assistant"
+                        lines.append(f"{role}: {m.content}")
+                    else:
+                        lines.append(str(m))
+                prompt = "\n".join(lines)
+
+            if prompt:
+                logger.info(f"🚀 统一调用 Agent {agent.agent_id} 的 ReAct 执行器，支持工具调用")
+                prompt = f"当前日期：{datetime.now().strftime('%Y年%m月%d日')}\n\n用户问题：{prompt}"
+                raw_resp = await agent.executor.ainvoke({"input": prompt})
+                output = raw_resp.get('output', str(raw_resp)) if isinstance(raw_resp, dict) else str(raw_resp)
+                return output
+
+        # —— 降级：普通 process_message 调用 ——
+        logger.info(f"调用 Agent {agent.agent_id} 的 process_message")
+        if messages is None and prompt is not None:
+            messages = [Message(conversation_id=conversation_id or 0, agent_id="user", content=prompt)]
+        elif messages is None:
+            return "错误：未提供 prompt 或 messages"
+
+        raw_resp = await agent.process_message(messages)
+        if isinstance(raw_resp, str):
+            return raw_resp
+        if hasattr(raw_resp, 'final_answer') and raw_resp.final_answer and hasattr(raw_resp.final_answer, 'content'):
+            return raw_resp.final_answer.content
+        if hasattr(raw_resp, 'content'):
+            return raw_resp.content
+        return str(raw_resp)
+
     async def _handle_mention(self, agent_id: str, conversation_id: str, messages: List[Dict[str, str]]) -> Dict[
         str, Any]:
         """处理 @mention 消息，直接调用对应的 Agent。"""
@@ -352,8 +408,12 @@ class Orchestrator:
         logger.info(f"Chat API: 消息将被路由到 Agent: {target_agent.agent_id}")
         history_as_msgs = [Message(conversation_id=conversation_id, agent_id=m.get("role"), content=m.get("content"))
                            for m in messages]
-        response: AgentResponse = await target_agent.process_message(messages=history_as_msgs)
-        return {"agent_id": target_agent.agent_id, "content": response.final_answer.content}
+        output = await self._call_agent_with_tools(
+            agent=target_agent,
+            messages=history_as_msgs,
+            conversation_id=conversation_id
+        )
+        return {"agent_id": target_agent.agent_id, "content": output}
 
     async def _handle_plan_command(self, conversation_id: str, task_content: str, checkpointer: AsyncSqliteSaver) -> \
     Dict[str, Any]:
@@ -551,14 +611,13 @@ class Orchestrator:
             agent_context = "\n".join(agent_list) if agent_list else "暂无"
             skills_prompt = self.get_available_skills_prompt()
 
-            context_prompt = f"""你是 AgentHub 的 Orchestrator Assistant，负责回答用户关于系统的问题。
+            context_prompt = f"""你是 AgentHub 的人工智能助手，可以调用工具完成任务。
 
 当前系统中可用的 Agent：
 {agent_context}
 
-{skills_prompt}
-
-你可以回答用户关于这些 Agent 和 Skill 的用途、能力等问题。如果你不知道某个 Agent 或 Skill 的具体细节，请如实告知用户。"""
+你可以自由使用以下工具(通过 Action: / Action Input: 格式)来完成用户交给你的任务：
+{', '.join(self.tool_skills.keys())}"""
 
             system_message = SystemMessage(content=context_prompt)
 
@@ -567,8 +626,17 @@ class Orchestrator:
                 messages]
             # 注入系统上下文
             full_messages = [system_message] + history_as_msgs
-            response: AgentResponse = await main_chat_agent.process_message(messages=full_messages)
-            return {"agent_id": main_chat_agent.agent_id, "content": response.final_answer.content}
+
+            # 通过统一调用入口，自动走 ReAct 或降级
+            output = await self._call_agent_with_tools(
+                agent=main_chat_agent,
+                messages=full_messages,
+                prompt=f"{context_prompt}\n\n" + "\n".join(
+                    f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages
+                ),
+                conversation_id=conversation_id
+            )
+            return {"agent_id": main_chat_agent.agent_id, "content": output}
 
         logger.warning("Chat API: 既没有匹配的指令，也找不到默认的主聊天 Agent。")
         return {
@@ -787,69 +855,76 @@ class Orchestrator:
                 
         logger.info(f"[VERIFY] 并行调度：{len(parallel_tasks)}个任务可并行执行，{len(sequential_tasks)}个任务需要顺序执行")
         
-        # 先执行并行任务
+        # 先执行并行任务 — 使用 asyncio.gather + _call_agent_with_tools，支持真正的工具调用
         if parallel_tasks:
-            def run_sync_task(task):
-                """在线程池中运行异步任务，实现真正的并发执行"""
-                agent_id = getattr(task, "agent_id")
-                prompt = getattr(task, "prompt", getattr(task, "description", ""))
-                agent = self.get_agent(agent_id)
-                if not agent:
-                    return {"step_id": task.step_id, "result": f"错误：找不到Agent {agent_id}"}
-                try:
-                    # 🔧 注入技能上下文，让Agent知道有web_search等工具可用
-                    skills_prompt = self.get_available_skills_prompt()
-                    full_prompt = f"{skills_prompt}\n=== 当前任务 ===\n{prompt}"
-                    from backend.models.message import Message
-                    msg = Message(conversation_id=state.get("conversation_id"), agent_id="user", content=full_prompt)
-                    # 使用asyncio.run处理异步方法，在线程池中独立执行
-                    import asyncio
-                    resp = asyncio.run(agent.process_message([msg]))
-                    logger.info(f"✅ 子任务{task.step_id}执行成功，Agent: {agent_id}")
-                    return {"step_id": task.step_id, "result": resp.final_answer.content}
-                except Exception as e:
-                    logger.error(f"❌ 子任务{task.step_id}执行失败: {e}")
-                    return {"step_id": task.step_id, "result": f"执行失败: {str(e)}"}
-            
-            # 使用ThreadPoolExecutor并发执行所有独立任务，支持多任务同时运行
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=len(parallel_tasks)) as executor:
-                loop = asyncio.get_event_loop()
-                futures = [loop.run_in_executor(executor, run_sync_task, t) for t in parallel_tasks]
-                parallel_results = await asyncio.gather(*futures)
-                
+            semaphore = asyncio.Semaphore(3)  # 限制 LLM 并发数，避免触发 rate limit
+
+            async def run_async_task(task):
+                """使用统一入口并发执行任务，自动走 ReAct 或降级"""
+                async with semaphore:
+                    agent_id = getattr(task, "agent_id")
+                    prompt = getattr(task, "prompt", getattr(task, "description", ""))
+                    agent = self.get_agent(agent_id)
+                    if not agent:
+                        return {"step_id": task.step_id, "result": f"错误：找不到Agent {agent_id}"}
+                    try:
+                        # 注入技能上下文 + 黑板上下文
+                        skills_prompt = self.get_available_skills_prompt()
+                        workspace = state.get("shared_workspace", {})
+                        workspace_context = "\n=== 之前任务的关键发现（黑板上下文） ===\n"
+                        if workspace:
+                            for key, value in workspace.items():
+                                workspace_context += f"- {key}: {str(value)[:300]}...\n"
+                        else:
+                            workspace_context += "暂无前置任务的共享上下文\n"
+                        full_prompt = f"{skills_prompt}\n{workspace_context}\n=== 当前任务 ===\n{prompt}"
+
+                        output_text = await self._call_agent_with_tools(
+                            agent=agent,
+                            prompt=full_prompt,
+                            conversation_id=state.get("conversation_id")
+                        )
+                        logger.info(f"✅ 子任务{task.step_id}执行成功，Agent: {agent_id}")
+                        return {"step_id": task.step_id, "result": output_text}
+                    except Exception as e:
+                        logger.error(f"❌ 子任务{task.step_id}执行失败: {e}")
+                        return {"step_id": task.step_id, "result": f"执行失败: {str(e)}"}
+
+            # 使用 asyncio.gather 并发执行所有独立任务，共享同一个事件循环
+            parallel_results = await asyncio.gather(
+                *[run_async_task(t) for t in parallel_tasks],
+                return_exceptions=True
+            )
+
             for r in parallel_results:
-                step_results[r["step_id"]] = r["result"]
-                # 🔧 黑板机制：将当前任务结果写入shared_workspace
-                task_info = next((t for t in parallel_tasks if t.step_id == r["step_id"]), None)
-                if task_info:
-                    current_workspace = state.get("shared_workspace", {})
-                    current_workspace[f"task_{r['step_id']}_output"] = r["result"]
-                    state["shared_workspace"] = current_workspace
-                # 从任务里获取agent_id（用于收集Agent输出和保存到数据库）
-                agent_id = getattr(task_info, "agent_id", "agent") if task_info else "agent"
-                # 收集 Agent 输出（用于前端展示依次回复）
-                agent_outputs.append({
-                    "agent_id": agent_id,
-                    "content": r["result"]
-                })
-                # 子任务完成后实时保存到数据库，前端轮询就能看到
-                conv_id = state.get("conversation_id")
-                if conv_id and self.db_session:
-                    from backend.services.conversation_service import ConversationService
-                    conv_service = ConversationService(self.db_session)
-                    conv_service.add_message_to_conversation(
-                        conversation_id=int(conv_id),
-                        agent_id=agent_id,
-                        content=f"📝 任务{r['step_id']}完成：\n{r['result']}"
-                    )
-                    logger.info(f"💾 子任务{r['step_id']}的消息已写入数据库，Agent: {agent_id}")
-                logger.info(f"📤 子任务{r['step_id']}完成，结果：{r['result'][:100]}...")
-            # 收集 Agent 输出（用于前端展示依次回复）
-            agent_outputs.append({
-                "agent_id": agent_id,
-                "content": r["result"]
-            })
+                if isinstance(r, Exception):
+                    logger.error(f"❌ 并行任务异常: {r}")
+                    continue
+                if isinstance(r, dict) and "step_id" in r:
+                    step_results[r["step_id"]] = r["result"]
+                    # 黑板机制：将当前任务结果写入shared_workspace
+                    task_info = next((t for t in parallel_tasks if t.step_id == r["step_id"]), None)
+                    if task_info:
+                        current_workspace = state.get("shared_workspace", {})
+                        current_workspace[f"task_{r['step_id']}_output"] = r["result"]
+                        state["shared_workspace"] = current_workspace
+                    agent_id = getattr(task_info, "agent_id", "agent") if task_info else "agent"
+                    # 收集 Agent 输出（用于前端展示依次回复）
+                    agent_outputs.append({
+                        "agent_id": agent_id,
+                        "content": r["result"]
+                    })
+                    # 子任务完成后实时保存到数据库
+                    conv_id = state.get("conversation_id")
+                    if conv_id and self.db_session:
+                        from backend.services.conversation_service import ConversationService
+                        conv_service = ConversationService(self.db_session)
+                        conv_service.add_message_to_conversation(
+                            conversation_id=int(conv_id),
+                            agent_id=agent_id,
+                            content=f"📝 任务{r['step_id']}完成：\n{r['result']}"
+                        )
+                    logger.info(f"📤 子任务{r['step_id']}完成，结果：{r['result'][:100]}...")
                 
         # 再执行顺序任务（简化处理，真实场景可做拓扑排序）
         for task in sequential_tasks:
@@ -871,35 +946,16 @@ class Orchestrator:
                     # 合并技能列表、黑板上下文和当前任务prompt
                     skills_prompt = self.get_available_skills_prompt()
                     full_prompt = f"{skills_prompt}\n{workspace_context}\n=== 当前任务 ===\n{prompt}"
-                    
-                    from backend.models.message import Message
-                    # 优先使用ReAct执行器调用，支持工具调用
-                    if hasattr(agent, 'executor'):
-                        logger.info(f"🚀 调用Agent {task.agent_id} 的ReAct执行器，支持工具调用")
-                        raw_resp = await agent.executor.ainvoke({"input": full_prompt})
-                        # 统一返回格式，处理各种可能的返回值
-                        output_text = raw_resp.get('output', str(raw_resp)) if isinstance(raw_resp, dict) else str(raw_resp)
-                        class MockResp:
-                            def __init__(self, content):
-                                self.final_answer = type('obj', (object,), {'content': content})
-                        resp = MockResp(output_text)
-                    else:
-                        # 降级为普通调用，确保统一处理所有返回格式
-                        msg = Message(conversation_id=state.get("conversation_id"), agent_id="user", content=full_prompt)
-                        raw_resp = await agent.process_message([msg])
-                        # 统一包装返回格式，兼容字符串、对象等多种返回类型
-                        if isinstance(raw_resp, str):
-                            output_text = raw_resp
-                        elif hasattr(raw_resp, 'final_answer') and hasattr(raw_resp.final_answer, 'content'):
-                            output_text = raw_resp.final_answer.content
-                        elif hasattr(raw_resp, 'content'):
-                            output_text = raw_resp.content
-                        else:
-                            output_text = str(raw_resp)
-                        class MockResp:
-                            def __init__(self, content):
-                                self.final_answer = type('obj', (object,), {'content': content})
-                        resp = MockResp(output_text)
+
+                    output_text = await self._call_agent_with_tools(
+                        agent=agent,
+                        prompt=full_prompt,
+                        conversation_id=state.get("conversation_id")
+                    )
+                    class MockResp:
+                        def __init__(self, content):
+                            self.final_answer = type('obj', (object,), {'content': content})
+                    resp = MockResp(output_text)
                     step_results[task.step_id] = resp.final_answer.content
                     # 🔧 黑板机制：将当前任务结果写入shared_workspace
                     current_workspace = state.get("shared_workspace", {})
@@ -923,11 +979,6 @@ class Orchestrator:
                         "content": resp.final_answer.content
                     })
                     logger.info(f"📤 顺序子任务{task.step_id}完成，结果：{resp.final_answer.content[:100]}...")
-                    # 收集 Agent 输出（用于前端展示依次回复）
-                    agent_outputs.append({
-                        "agent_id": agent_id,
-                        "content": resp.final_answer.content
-                })
                 except Exception as e:
                     step_results[task.step_id] = f"执行失败: {str(e)}"
                     logger.error(f"❌ 顺序子任务{task.step_id}执行失败: {e}")
@@ -1124,7 +1175,7 @@ class Orchestrator:
     def _create_langchain_llm(self, agent: BaseAgent) -> Any:
         """
         为 Agent 创建 LangChain ChatModel，用于 ReAct 循环。
-        根据 Agent 使用的适配器类型（Tongyi / DeepSeek）选择合适的 LangChain 模型。
+        用直接 HTTP 调用的轻量封装，避免 langchain-openai / langchain-community 版本冲突。
         """
         adapter_type = "tongyi"
         model_name = "qwen-plus"
@@ -1136,59 +1187,117 @@ class Orchestrator:
                 model_name = getattr(adapter, 'model_name', 'deepseek-chat')
             elif hasattr(adapter, 'model_name'):
                 model_name = adapter.model_name
+        elif hasattr(agent, 'model_name'):
+            # 直接适配器类（如 TongyiAdapter、DeepSeekAdapter），agent本身就是适配器
+            model_name = agent.model_name
+            if isinstance(agent, DeepSeekAdapter):
+                adapter_type = "deepseek"
 
-        try:
-            if adapter_type == "deepseek":
-                from langchain_openai import ChatOpenAI
-                api_key = os.environ.get("DEEPSEEK_API_KEY")
-                if not api_key:
-                    logger.warning("DEEPSEEK_API_KEY 未设置，无法为 DeepSeek 创建 ReAct LLM")
-                    return None
-                return ChatOpenAI(
-                    model=model_name,
-                    api_key=api_key,
-                    base_url="https://api.deepseek.com/v1",
-                    temperature=0.7,
+        from langchain_core.language_models.chat_models import BaseChatModel
+        from langchain_core.messages import BaseMessage, AIMessage, HumanMessage
+        from langchain_core.outputs import ChatGeneration, ChatResult
+        import requests
+
+        class HttpChatModel(BaseChatModel):
+            """轻量 LangChain ChatModel：直接 HTTP 调用 API，0 外部依赖冲突"""
+            model_name: str = "qwen-plus"
+            temperature: float = 0.7
+            api_key: str = ""
+            base_url: str = ""
+
+            @property
+            def _llm_type(self) -> str:
+                return "http-chat-model"
+
+            def _generate(
+                self,
+                messages: list,
+                stop: list = None,
+                run_manager=None,
+                **kwargs,
+            ) -> ChatResult:
+                api_messages = []
+                for m in messages:
+                    if isinstance(m, HumanMessage):
+                        api_messages.append({"role": "user", "content": m.content})
+                    elif isinstance(m, AIMessage):
+                        api_messages.append({"role": "assistant", "content": m.content})
+                    else:
+                        api_messages.append({"role": m.type, "content": str(m.content)})
+
+                payload = {
+                    "model": self.model_name,
+                    "messages": api_messages,
+                    "temperature": self.temperature,
+                }
+                if stop:
+                    payload["stop"] = stop
+
+                resp = requests.post(
+                    self.base_url,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=60,
                 )
+                if resp.status_code != 200:
+                    raise RuntimeError(f"API {resp.status_code}: {resp.text[:300]}")
 
-            from langchain_community.chat_models.tongyi import ChatTongyi
-            return ChatTongyi(
-                model=model_name,
-                temperature=0.7,
+                data = resp.json()
+                content = data["choices"][0]["message"]["content"]
+                message = AIMessage(content=content)
+                return ChatResult(generations=[ChatGeneration(message=message)])
+
+        if adapter_type == "deepseek":
+            api_key = os.environ.get("DEEPSEEK_API_KEY")
+            if not api_key:
+                logger.warning("DEEPSEEK_API_KEY 未设置，无法为 DeepSeek 创建 ReAct LLM")
+                return None
+            return HttpChatModel(
+                model_name=model_name,
+                api_key=api_key,
+                base_url="https://api.deepseek.com/v1/chat/completions",
             )
-        except ImportError as e:
-            logger.warning(f"创建 LangChain ChatModel 失败，请安装对应依赖: {e}")
+
+        api_key = os.environ.get("DASHSCOPE_API_KEY")
+        if not api_key:
+            logger.warning("DASHSCOPE_API_KEY 未设置，无法为 Tongyi 创建 ReAct LLM")
             return None
+        return HttpChatModel(
+            model_name=model_name,
+            api_key=api_key,
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        )
 
     def register_agent(self, agent: BaseAgent):
         """注册Agent到Orchestrator，自动绑定所有工具，支持ReAct循环"""
-        # 兼容不同版本的LangChain，处理import路径问题
         try:
-            from langchain.agents import AgentExecutor, create_react_agent
+            from langchain.agents.agent import AgentExecutor
+            from langchain.agents import create_react_agent
         except ImportError:
-            try:
-                # 新版LangChain的导入路径
-                from langchain.agents.react.agent import create_react_agent
-                from langchain.agents.agent_executor import AgentExecutor
-            except ImportError:
-                logger.warning("⚠️ 未找到LangChain的ReAct相关模块，将跳过ReAct支持，请安装langchain>=0.1.0: pip install langchain langchain-core")
-                if agent.agent_id in self.agents:
-                    logger.warning(f"Agent '{agent.agent_id}' 已被注册，将被覆盖。")
-                self.agents[agent.agent_id] = agent
-                logger.info(f"✅ Agent '{agent.agent_id}' 已注册（无ReAct支持）。")
-                return
+            logger.warning("⚠️ 未找到LangChain的ReAct相关模块，将跳过ReAct支持")
+            if agent.agent_id in self.agents:
+                logger.warning(f"Agent '{agent.agent_id}' 已被注册，将被覆盖。")
+            self.agents[agent.agent_id] = agent
+            logger.info(f"✅ Agent '{agent.agent_id}' 已注册（无ReAct支持）。")
+            return
         from langchain_core.prompts import ChatPromptTemplate
         
         # 给agent创建ReAct执行器，绑定所有langchain_tools
-        # 如果agent没有.llm，尝试为工具型Agent（CustomAgent等）创建一个LangChain LLM
-        if not hasattr(agent, 'llm') and self.langchain_tools and hasattr(agent, 'llm_adapter'):
+        # 统一尝试为 Agent 创建 LLM，不区分 CustomAgent/适配器类型
+        if not hasattr(agent, 'llm') and self.langchain_tools:
             agent.llm = self._create_langchain_llm(agent)
 
         if hasattr(agent, 'llm') and self.langchain_tools:
             try:
                 # ReAct标准prompt模板
                 react_prompt = ChatPromptTemplate.from_template("""回答以下问题，你可以使用以下工具：
+
 {tools}
+
+工具名称列表：{tool_names}
 
 请按照以下格式输出：
 Thought: 你现在的思考，描述你需要做什么
