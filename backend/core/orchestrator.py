@@ -4,7 +4,7 @@ import re
 import os
 import importlib
 import yaml
-from typing import List, Dict, Any, Callable
+from typing import List, Dict, Any, Callable, Optional
 
 
 from backend.models.task_spec import TaskSpec
@@ -26,6 +26,8 @@ from backend.llm.llm_provider import get_llm
 from backend.workflows.base import BaseWorkflow
 
 from backend.utils.logger import logger
+from backend.core.memory_strategy import apply_memory_strategy
+from backend.core.validation_strategy import apply_validation_strategy, get_max_retries
 
 # 一个简单的正则表达式，用于从消息内容中匹配 @agent_id
 MENTION_REGEX = r'@(\w+)'
@@ -204,6 +206,16 @@ class Orchestrator:
         except ImportError as e:
             logger.warning(f"加载file_converter工具失败: {e}")
             pass
+        try:
+            import importlib
+            manage_agent = importlib.import_module('backend.utils.manage_agent')
+            manage_agent_funcs = getattr(manage_agent, '__all__', [])
+            for func_name in manage_agent_funcs:
+                if hasattr(manage_agent, func_name):
+                    self.tool_skills[f"manage_agent.{func_name}"] = getattr(manage_agent, func_name)
+        except ImportError as e:
+            logger.warning(f"加载manage_agent工具失败: {e}")
+            pass
         # 将所有工具类Skill转换为LangChain Tool格式
         from langchain.tools import tool
         for skill_key, skill_func in self.tool_skills.items():
@@ -257,10 +269,10 @@ class Orchestrator:
             logger.info(f"🎯 匹配得分{max_score}未达阈值{WORKFLOW_TRIGGER_THRESHOLD}，不触发固定工作流，进入深度调度逻辑")
             return None, 0
 
-    async def get_chat_response(self, conversation_id: str, messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    async def get_chat_response(self, conversation_id: str, messages: List[Dict[str, str]], request_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         重构后的核心调度入口：完全自主判断用户请求，不需要用户输入任何/xxx命令
-        优先级：@mention > 自动匹配的固定工作流 > 复杂任务动态规划 > 普通聊天
+        优先级：@mention > Agent管理请求 > 自动匹配的固定工作流 > 复杂任务动态规划 > 普通聊天
         """
         if not messages:
             return {"agent_id": "orchestrator", "content": "没有收到任何消息。"}
@@ -294,9 +306,14 @@ class Orchestrator:
             mentioned_agent_id = self._find_mentioned_agent_id(content)
             if mentioned_agent_id:
                 logger.info(f"[VERIFY] 触发@mention路由: {mentioned_agent_id}")
-                return await self._handle_mention(mentioned_agent_id, conversation_id, messages)
+                return await self._handle_mention(mentioned_agent_id, conversation_id, messages, request_context or {})
 
-            # 2. 第二优先级：自动匹配固定工作流，完全不用用户输入命令，统一阈值避免误匹配
+            # 2. 第二优先级：Agent 管理请求，由 LLM 分类器识别，优先交给 agent_builder 执行
+            if complexity_level == "agent_management":
+                logger.info("[VERIFY] LLM 分类为 Agent 管理请求，优先路由到 agent_builder")
+                return await self._handle_agent_management_request(conversation_id, messages, request_context or {})
+
+            # 3. 第三优先级：自动匹配固定工作流，完全不用用户输入命令，统一阈值避免误匹配
             matched_workflow, max_score = self._auto_match_workflow(content)
             WORKFLOW_TRIGGER_THRESHOLD = 6
             if matched_workflow and max_score > WORKFLOW_TRIGGER_THRESHOLD:
@@ -306,10 +323,10 @@ class Orchestrator:
             else:
                 logger.info(f"[VERIFY] 任务判断：匹配得分{max_score}未达阈值({WORKFLOW_TRIGGER_THRESHOLD})，进入深度调度逻辑")
 
-            # 3. 第三优先级：LLM 复杂度路由
+            # 4. 第四优先级：LLM 复杂度路由
             if complexity_level == "complex":
                 logger.info(f"[VERIFY] 工作流/技能选择：复杂任务，启动动态规划")
-                return await self._handle_plan_command(conversation_id, content, checkpointer)
+                return await self._handle_plan_command(conversation_id, content, checkpointer, request_context or {})
 
             if complexity_level == "moderate":
                 logger.info(f"[VERIFY] 工作流/技能选择：中等复杂度任务，路由到主 Agent 直接执行")
@@ -317,7 +334,7 @@ class Orchestrator:
                 moderate_messages = [{"role": "user", "content": enhanced_content}]
                 return await self._handle_default_chat(conversation_id, moderate_messages)
 
-            # 4. 最后检查是否是LLM自己生成的Skill调用请求
+            # 5. 最后检查是否是LLM自己生成的Skill调用请求
             skill_call = self._parse_skill_call(content)
             if skill_call:
                 skill_name, method, input_content = skill_call
@@ -333,14 +350,14 @@ class Orchestrator:
                     final_content = str(final_response).strip()
                 return {"agent_id": "orchestrator", "content": final_content}
 
-            # 5. 检查是否是系统查询（关于orchestrator自身的能力、Agent列表、Skill列表等）
+            # 6. 检查是否是系统查询（关于orchestrator自身的能力、Agent列表、Skill列表等）
             #    这类问题 orchestrator 应该自己回答，而不是路由到 LLM
             system_reply = self._handle_system_query(content)
             if system_reply:
                 logger.info(f"[VERIFY] 工作流/技能选择：系统查询，由 Orchestrator 自行回答")
                 return {"agent_id": "orchestrator", "content": system_reply}
 
-            # 6. 默认行为：普通聊天
+            # 7. 默认行为：普通聊天
             logger.info(f"[VERIFY] 工作流/技能选择：普通聊天，路由到默认对话Agent")
             return await self._handle_default_chat(conversation_id, messages)
 
@@ -359,7 +376,6 @@ class Orchestrator:
         from backend.models.message import Message
         from datetime import datetime
 
-        # —— 优先使用 ReAct 执行器 ——
         if hasattr(agent, 'executor'):
             if prompt is None and messages:
                 lines = []
@@ -382,7 +398,6 @@ class Orchestrator:
                 output = raw_resp.get('output', str(raw_resp)) if isinstance(raw_resp, dict) else str(raw_resp)
                 return output
 
-        # —— 降级：普通 process_message 调用 ——
         logger.info(f"调用 Agent {agent.agent_id} 的 process_message")
         if messages is None and prompt is not None:
             messages = [Message(conversation_id=conversation_id or 0, agent_id="user", content=prompt)]
@@ -398,24 +413,188 @@ class Orchestrator:
             return raw_resp.content
         return str(raw_resp)
 
-    async def _handle_mention(self, agent_id: str, conversation_id: str, messages: List[Dict[str, str]]) -> Dict[
+    def _build_agent_management_prompt(self, user_request: str, conversation_id: str, messages: Optional[List[Dict[str, str]]] = None, request_context: Optional[Dict[str, Any]] = None) -> str:
+        logger.info("build_agent 已启动")
+        context = request_context or {}
+
+        current_user_id = context.get("current_user_id", "")
+        logger.info(f"current_user_id: {current_user_id}")
+        recent_context = "\n".join(
+            f"- {m.get('role', 'unknown')}: {str(m.get('content', '')).strip()}"
+            for m in (messages or [])[-6:]
+            if str(m.get("content", "")).strip()
+        ) or "- no extra context"
+        return f"""你是 AgentHub 的 Agent Builder，负责在系统中创建或修改 Agent。
+
+你必须遵守以下规则：
+1. 如果用户要修改已有 Agent，先调用 `manage_agent.list_agents` 查看当前用户已有的 Agent。
+2. 如果用户要新建 Agent，收集足够信息后调用 `manage_agent.create_agent`。
+3. 如果用户要更新 Agent，调用 `manage_agent.update_agent`。
+4. 所有工具输入都必须是 JSON 对象。`conversation_id` 和 `current_user_id` 已由系统提供（见下方上下文），调用工具时**必须带上**这两个字段。
+5. JSON 字段可使用：`conversation_id`、`current_user_id`、`agent_id`、`target_name`、`name`、`description`、`system_prompt`、`llm_adapter`、`tools`、`icon`、`memory_config`、`planning_config`、`validation_config`。
+6. 嵌套配置字段示例（均为可选，未明说不要下发）：
+   - memory_config:
+     * {{ "strategy": "none" }}
+     * {{ "strategy": "sliding_window", "window_size": 10 }}
+     * {{ "strategy": "summary", "summary_threshold": 4000, "summary_prompt": "..." }}
+   - planning_config:
+     * {{ "mode": "direct" }}
+     * {{ "mode": "react" }}
+     * {{ "mode": "plan_execute", "steps_template": "...", "require_confirmation_for_complex_tasks": false }}
+   - validation_config:
+     * {{ "strategy": "none" }}
+     * {{ "strategy": "rules", "rules": [{{"type":"regex","pattern":"...","message":"..."}}], "max_retries": 1 }}
+     * {{ "strategy": "llm_judge", "judge_prompt": "...", "max_retries": 1 }}
+7. **对于缺失的字段，使用合理的默认值，不要追问用户。** 例如：
+   - `name` 默认使用用户描述的职能名（如“数据分析师”）
+   - `llm_adapter` 默认使用 `"tongyi"`（可选值只有 `"tongyi"` 和 `"deepseek"`）
+   - `tools` 默认使用 `[]`（空列表）
+   - `description` 从用户描述中一句话概括
+   只有当用户完全没有提供任何 agent 相关信息时，才简要说明需要什么。
+8. 每个工具调用的 JSON **必须包含**以下两个字段（直接从下方「当前执行上下文」拷贝数值）：
+   - "conversation_id": {conversation_id}
+   - "current_user_id": {current_user_id or 0}
+9. 完成后用自然语言汇报结果，包含 Agent 名称、用途、模型和是否已成功生效。
+
+当前执行上下文（请直接使用，**不要质疑这些值**）：
+- conversation_id: {conversation_id}
+- current_user_id: {current_user_id or 'unknown'}
+
+用户原始请求：
+{user_request}
+"""
+
+
+    async def _handle_agent_management_request(self, conversation_id: str, messages: List[Dict[str, str]], request_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        target_agent = self.get_agent("agent_builder")
+        if not target_agent:
+            logger.warning("agent_builder 未注册，回退到默认聊天")
+            return await self._handle_default_chat(conversation_id, messages)
+
+        # 🎯 解析 current_user_id：优先从 request_context，次之从 conversation 查库
+        current_user_id = (request_context or {}).get("current_user_id", "")
+        if not current_user_id and conversation_id:
+            try:
+                from backend.db.database import SessionLocal
+                from backend.models.conversation import Conversation as ConversationModel
+                _db = SessionLocal()
+                _conv = _db.query(ConversationModel).filter(ConversationModel.id == int(conversation_id)).first()
+                if _conv and _conv.user_id:
+                    current_user_id = _conv.user_id
+                _db.close()
+            except Exception:
+                pass
+
+        # 🎯 设置 manage_agent 调用上下文，确保工具函数能自动注入身份信息
+        try:
+            import backend.utils.manage_agent as _ma
+            _ma._caller_ctx.set({
+                "current_user_id": current_user_id,
+                "conversation_id": conversation_id
+            })
+        except Exception:
+            pass
+
+        latest_user_request = messages[-1].get("content", "") if messages else ""
+        prompt = self._build_agent_management_prompt(latest_user_request, conversation_id, messages, request_context)
+        output_text = await self._call_agent_with_tools(
+            agent=target_agent,
+            prompt=prompt,
+            conversation_id=conversation_id
+        )
+        return {"agent_id": target_agent.agent_id, "content": output_text}
+
+    async def _handle_mention(self, agent_id: str, conversation_id: str, messages: List[Dict[str, str]], request_context: Optional[Dict[str, Any]] = None) -> Dict[
         str, Any]:
-        """处理 @mention 消息，直接调用对应的 Agent。"""
+        """处理 @mention 消息，直接调用对应的 Agent。
+
+        A 档：对自定义 Agent 应用 per-Agent 的 memory / planning / validation 配置。
+        """
         target_agent = self.get_agent(agent_id)
         if not target_agent:
             return {"agent_id": "orchestrator", "content": f"未找到名为 '{agent_id}' 的 Agent。"}
 
         logger.info(f"Chat API: 消息将被路由到 Agent: {target_agent.agent_id}")
-        history_as_msgs = [Message(conversation_id=conversation_id, agent_id=m.get("role"), content=m.get("content"))
-                           for m in messages]
-        output = await self._call_agent_with_tools(
-            agent=target_agent,
-            messages=history_as_msgs,
-            conversation_id=conversation_id
-        )
-        return {"agent_id": target_agent.agent_id, "content": output}
+        if target_agent.agent_id == "agent_builder":
+            latest_user_request = messages[-1].get("content", "") if messages else ""
+            prompt = self._build_agent_management_prompt(latest_user_request, conversation_id, messages, request_context)
+            output_text = await self._call_agent_with_tools(
+                agent=target_agent,
+                prompt=prompt,
+                conversation_id=conversation_id
+            )
+            return {"agent_id": target_agent.agent_id, "content": output_text}
 
-    async def _handle_plan_command(self, conversation_id: str, task_content: str, checkpointer: AsyncSqliteSaver) -> \
+        # === A 档 Step 1: 记忆裁剪 ===
+        memory_cfg = getattr(target_agent, "memory_config", None)
+        if memory_cfg:
+            messages = await apply_memory_strategy(messages, memory_cfg, self._llm_invoke_text)
+
+        # === A 档 Step 2: 规划路由 ===
+        planning_cfg = getattr(target_agent, "planning_config", None) or {}
+        mode = str(planning_cfg.get("mode") or "direct").lower()
+
+        async def _direct_invoke(_messages: List[Dict[str, str]]) -> str:
+            history = [Message(conversation_id=conversation_id, agent_id=m.get("role"), content=m.get("content"))
+                       for m in _messages]
+            resp: AgentResponse = await target_agent.process_message(messages=history)
+            return resp.final_answer.content if resp and resp.final_answer else ""
+
+        if mode == "react":
+            # ReAct：使用 target_agent.executor（register_agent 已在有 tools 时挂上）
+            if hasattr(target_agent, "executor"):
+                logger.info(f"[planning] route=react for {target_agent.agent_id}")
+                latest = messages[-1].get("content", "") if messages else ""
+                try:
+                    answer_text = await self._call_agent_with_tools(
+                        agent=target_agent,
+                        prompt=latest,
+                        conversation_id=conversation_id
+                    )
+                except Exception as exc:
+                    logger.warning(f"[planning] react 失败，fallback direct: {exc}")
+                    answer_text = await _direct_invoke(messages)
+            else:
+                logger.warning(f"[planning] mode=react 但 Agent 无 executor，fallback direct")
+                answer_text = await _direct_invoke(messages)
+        elif mode == "plan_execute":
+            logger.info(f"[planning] route=plan_execute for {target_agent.agent_id}")
+            # 复用 _handle_plan_command（需要 checkpointer，这里临时创建一个 MemorySaver 兜底）
+            try:
+                checkpointer = MemorySaver()
+                latest = messages[-1].get("content", "") if messages else ""
+                plan_result = await self._handle_plan_command(conversation_id, latest, checkpointer, request_context)
+                answer_text = plan_result.get("content", "") if isinstance(plan_result, dict) else str(plan_result)
+            except Exception as exc:
+                logger.warning(f"[planning] plan_execute 失败，fallback direct: {exc}")
+                answer_text = await _direct_invoke(messages)
+        else:
+            logger.info(f"[planning] route=direct for {target_agent.agent_id}")
+            answer_text = await _direct_invoke(messages)
+
+        # === A 档 Step 3: 校验闭环 ===
+        validation_cfg = getattr(target_agent, "validation_config", None)
+        if validation_cfg:
+            max_retries = get_max_retries(validation_cfg)
+            for attempt in range(max_retries + 1):
+                result = await apply_validation_strategy(answer_text, validation_cfg, self._llm_invoke_text)
+                if result.passed:
+                    break
+                if attempt < max_retries:
+                    logger.info(f"[validation] 第 {attempt + 1} 次失败，触发重试: {result.reason_text}")
+                    # 在 messages 末尾追加一条 system 提示，重新走 direct 路径生成
+                    retry_messages = messages + [{
+                        "role": "system",
+                        "content": f"上一次回答未通过校验：{result.reason_text}\n请改进后重新作答。",
+                    }]
+                    answer_text = await _direct_invoke(retry_messages)
+                else:
+                    logger.info(f"[validation] 已达 max_retries={max_retries}，附带提示返回")
+                    answer_text = f"{answer_text}\n\n⚠️ 自动校验未通过：{result.reason_text}"
+
+        return {"agent_id": target_agent.agent_id, "content": answer_text}
+
+    async def _handle_plan_command(self, conversation_id: str, task_content: str, checkpointer: AsyncSqliteSaver, request_context: Optional[Dict[str, Any]] = None) -> \
     Dict[str, Any]:
         """处理复杂任务，执行完整的规划工作流。"""
         logger.info(f"Chat API: 启动动态规划处理复杂任务: {task_content[:30]}...")
@@ -485,6 +664,7 @@ class Orchestrator:
             task_content=task_content, plan_data=plan_data, step_results={},
             final_summary="", conversation_id=conversation_id, messages=[]
         )
+        initial_state["current_user_id"] = (request_context or {}).get("current_user_id")
 
         if latest_checkpoint and 'values' in latest_checkpoint:
             initial_state["messages"] = latest_checkpoint['values'].get("messages", [])
@@ -600,11 +780,34 @@ class Orchestrator:
         await self._compress_and_forget(conversation_id, checkpointer, final_state, None)
         return {"agent_id": "orchestrator", "content": summary}
 
+    async def _llm_invoke_text(self, msgs: List[Dict[str, str]]) -> str:
+        """工具方法：直接用全局 self.llm 跑一轮，返回纯文本。供 memory.summary 与 llm_judge 使用。"""
+        try:
+            resp = await self.llm.invoke(msgs)
+            return resp.strip() if isinstance(resp, str) else str(resp).strip()
+        except Exception as exc:
+            logger.warning(f"_llm_invoke_text 失败: {exc}")
+            return ""
+
     async def _handle_default_chat(self, conversation_id: str, messages: List[Dict[str, str]]) -> Dict[str, Any]:
-        """处理不包含任何指令的普通聊天消息。"""
+        """处理不包含任何指令的普通聊天消息。
+
+        A 档运行时三段式：
+        1) 记忆裁剪 (apply_memory_strategy)
+        2) 规划路由 (按 target_agent.planning_config.mode 选择 direct / react / plan_execute)
+        3) 校验闭环 (apply_validation_strategy + max_retries 重试)
+        """
         main_chat_agent = self.get_agent("tongyi")
         if main_chat_agent:
             logger.info(f"Chat API: 默认路由到主聊天 Agent: {main_chat_agent.agent_id}")
+
+            # === A 档 Step 1: 记忆裁剪 ===
+            # main_chat_agent 是系统内置 Agent，没有 memory_config；
+            # 仅当通过 @mention 路由到自定义 Agent 时才有 per-Agent 配置。
+            # 此处对内置 Agent 跳过裁剪（保持原行为）。
+            memory_cfg = getattr(main_chat_agent, "memory_config", None)
+            if memory_cfg:
+                messages = await apply_memory_strategy(messages, memory_cfg, self._llm_invoke_text)
 
             # 构建系统上下文：告知当前可用的 Agent、Skill 等信息
             agent_list = [f"- {getattr(agent, 'name', agent_id)}" for agent_id, agent in self.agents.items()]
@@ -637,6 +840,7 @@ class Orchestrator:
                 conversation_id=conversation_id
             )
             return {"agent_id": main_chat_agent.agent_id, "content": output}
+
 
         logger.warning("Chat API: 既没有匹配的指令，也找不到默认的主聊天 Agent。")
         return {
@@ -735,7 +939,7 @@ class Orchestrator:
 
     async def _classify_complexity(self, user_message: str, history_summary: str = "") -> str:
         """
-        使用 LLM 将用户请求分类为: simple / moderate / complex
+        使用 LLM 将用户请求分类为: agent_management / simple / moderate / complex
         返回字符串供路由使用。
         """
         prompt = f"""分析以下用户请求，结合对话历史摘要，判断任务的复杂度级别。
@@ -746,17 +950,18 @@ class Orchestrator:
 对话历史摘要：{history_summary if history_summary else "无"}
 
 任务复杂度定义：
+- agent_management: 用户在创建、修改、更新、删除或查询 Agent（智能体）的配置，例如「帮我创建一个数据分析师」「修改xxxAgent的提示词」「有哪些Agent可用」。
 - simple: 简单闲聊、常识问答、单步翻译、无需外部工具或深度推理。
 - moderate: 需要多步推理、工具调用、或中等长度的技术任务（如代码优化、写详细文档），但只需一个专家即可完成。
 - complex: 需要多个不同角色协作（如前后端开发+测试+文档）、任务可拆分成多个独立子任务，或需要严格的多阶段产出。
 
-请只返回一个单词：simple、moderate 或 complex。"""
+请只返回一个单词：agent_management、simple、moderate 或 complex。"""
 
         messages = [{"role": "user", "content": prompt}]
         try:
             resp = await self.llm.invoke(messages)
             content = resp.content.strip().lower() if hasattr(resp, 'content') else str(resp).strip().lower()
-            if content in ("simple", "moderate", "complex"):
+            if content in ("simple", "moderate", "complex", "agent_management"):
                 return content
         except Exception as e:
             logger.warning(f"LLM 复杂度分类失败，降级为关键词规则: {e}")
@@ -868,7 +1073,6 @@ class Orchestrator:
                     if not agent:
                         return {"step_id": task.step_id, "result": f"错误：找不到Agent {agent_id}"}
                     try:
-                        # 注入技能上下文 + 黑板上下文
                         skills_prompt = self.get_available_skills_prompt()
                         workspace = state.get("shared_workspace", {})
                         workspace_context = "\n=== 之前任务的关键发现（黑板上下文） ===\n"
@@ -877,7 +1081,8 @@ class Orchestrator:
                                 workspace_context += f"- {key}: {str(value)[:300]}...\n"
                         else:
                             workspace_context += "暂无前置任务的共享上下文\n"
-                        full_prompt = f"{skills_prompt}\n{workspace_context}\n=== 当前任务 ===\n{prompt}"
+                        runtime_context = f"=== 执行上下文 ===\n- conversation_id: {state.get('conversation_id')}\n- current_user_id: {state.get('current_user_id') or 'unknown'}"
+                        full_prompt = f"{skills_prompt}\n{runtime_context}\n{workspace_context}\n=== 当前任务 ===\n{prompt}"
 
                         output_text = await self._call_agent_with_tools(
                             agent=agent,
@@ -895,6 +1100,7 @@ class Orchestrator:
                 *[run_async_task(t) for t in parallel_tasks],
                 return_exceptions=True
             )
+
 
             for r in parallel_results:
                 if isinstance(r, Exception):
@@ -945,7 +1151,8 @@ class Orchestrator:
                     
                     # 合并技能列表、黑板上下文和当前任务prompt
                     skills_prompt = self.get_available_skills_prompt()
-                    full_prompt = f"{skills_prompt}\n{workspace_context}\n=== 当前任务 ===\n{prompt}"
+                    runtime_context = f"=== 执行上下文 ===\n- conversation_id: {state.get('conversation_id')}\n- current_user_id: {state.get('current_user_id') or 'unknown'}"
+                    full_prompt = f"{skills_prompt}\n{runtime_context}\n{workspace_context}\n=== 当前任务 ===\n{prompt}"
 
                     output_text = await self._call_agent_with_tools(
                         agent=agent,
@@ -956,6 +1163,7 @@ class Orchestrator:
                         def __init__(self, content):
                             self.final_answer = type('obj', (object,), {'content': content})
                     resp = MockResp(output_text)
+
                     step_results[task.step_id] = resp.final_answer.content
                     # 🔧 黑板机制：将当前任务结果写入shared_workspace
                     current_workspace = state.get("shared_workspace", {})
@@ -1350,6 +1558,10 @@ Final Answer: 最终的答案
             llm_adapter=adapter_instance,
             name=db_agent.name
         )
+        # A 档：把 3 类配置挂到 Agent 实例上，供运行时 (_handle_default_chat / _handle_mention) 读取
+        new_agent.memory_config = getattr(db_agent, "memory_config", None)
+        new_agent.planning_config = getattr(db_agent, "planning_config", None)
+        new_agent.validation_config = getattr(db_agent, "validation_config", None)
         self.register_agent(new_agent)
         logger.info(f"✅ 成功注册自定义Agent: {db_agent.name} ({db_agent.agent_id})")
 
@@ -1366,7 +1578,7 @@ Final Answer: 最终的答案
             logger.info(f"✅ 启动时自动加载了{len(db_agents)}个自定义Agent")
             db.close()
         except Exception as e:
-            logger.error(f"加载自定义Agent失败: {e}")
+            logger.warning(f"加载自定义Agent失败（数据库可能还未迁移，重启即可解决）: {e}")
 
     def get_workflow(self, workflow_id: str) -> StateGraph | None:
         """检索已有工作流的方法，和get_agent对应，外部可以调用这个方法检查工作流是否存在"""

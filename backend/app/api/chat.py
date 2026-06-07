@@ -73,7 +73,8 @@ async def simple_chat(
             temp_conv_id = conversation_id or 0
             response = await orchestrator.get_chat_response(
                 conversation_id=temp_conv_id,
-                messages=all_messages
+                messages=all_messages,
+                request_context={"current_user_id": current_user.id}
             )
             if isinstance(response, dict) and "content" in response:
                 reply_content = response["content"]
@@ -184,7 +185,8 @@ async def send_message(
 
         final_state = await orchestrator.get_chat_response(
             conversation_id=conversation_id,
-            messages=messages_for_orchestrator
+            messages=messages_for_orchestrator,
+            request_context={"current_user_id": current_user.id}
         )
         logger.info("[CHAT API] 成功收到 Orchestrator 的响应。")
         logger.debug(f"[CHAT API] Orchestrator 最终状态类型: {type(final_state)}")
