@@ -283,7 +283,7 @@ class Orchestrator:
             pass
         # 注册文件转换工具组的所有方法
         try:
-            file_converter = importlib.import_module('backends.utils.file_converter')
+            file_converter = importlib.import_module('backend.utils.file_converter')
             # 获取所有导出的函数
             converter_funcs = getattr(file_converter, '__all__', [])
             for func_name in converter_funcs:
@@ -293,7 +293,7 @@ class Orchestrator:
             logger.warning(f"加载file_converter工具失败: {e}")
             pass
         try:
-            manage_agent = importlib.import_module('backends.utils.manage_agent')
+            manage_agent = importlib.import_module('backend.utils.manage_agent')
             manage_agent_funcs = getattr(manage_agent, '__all__', [])
             for func_name in manage_agent_funcs:
                 if hasattr(manage_agent, func_name):
@@ -772,54 +772,57 @@ class Orchestrator:
             for m in (messages or [])[-6:]
             if str(m.get("content", "")).strip()
         ) or "- no extra context"
+        # 收集现有 Agent 信息
+        try:
+            from backend.db.database import SessionLocal
+            from backend.models.custom_agent import CustomAgent as CAM
+            db = SessionLocal()
+            rows = db.query(CAM).filter(CAM.user_id == current_user_id, CAM.is_active == True).all()
+            existing_names = ", ".join([r.name for r in rows]) or "(无)"
+            db.close()
+        except Exception:
+            existing_names = "(无法查询)"
+
         return f"""你是 AgentHub 的 Agent Builder，负责在系统中创建或修改 Agent。
 
 你必须遵守以下规则：
-1. 如果用户要修改已有 Agent，先调用 `manage_agent.list_agents` 查看当前用户已有的 Agent。
-2. 如果用户要新建 Agent，收集足够信息后调用 `manage_agent.create_agent`。
-3. 如果用户要更新 Agent，调用 `manage_agent.update_agent`。
-4. 所有工具输入都必须是 JSON 对象。`conversation_id` 和 `current_user_id` 已由系统提供（见下方上下文），调用工具时**必须带上**这两个字段。
-5. JSON 字段可使用：`conversation_id`、`current_user_id`、`agent_id`、`target_name`、`name`、`description`、`system_prompt`、`llm_backend`、`tools`、`icon`、`memory_config`、`planning_config`、`validation_config`。
-6. 嵌套配置字段示例（均为可选，未明说不要下发）：
-   - memory_config:
-     * {{ "strategy": "none" }}
-     * {{ "strategy": "sliding_window", "window_size": 10 }}
-     * {{ "strategy": "summary", "summary_threshold": 4000, "summary_prompt": "..." }}
-   - planning_config:
-     * {{ "mode": "direct" }}
-     * {{ "mode": "react" }}
-     * {{ "mode": "plan_execute", "steps_template": "...", "require_confirmation_for_complex_tasks": false }}
-   - validation_config:
-     * {{ "strategy": "none" }}
-     * {{ "strategy": "rules", "rules": [{{"type":"regex","pattern":"...","message":"..."}}], "max_retries": 1 }}
-     * {{ "strategy": "llm_judge", "judge_prompt": "...", "max_retries": 1 }}
-7. **对于缺失的字段，使用合理的默认值，不要追问用户。** 例如：
-   - `name` 默认使用用户描述的职能名（如“数据分析师”）
-   - `llm_backend` 默认使用 `"tongyi"`（可选值: `" + ", ".join(self.llm_backends.keys()) + "`）
-   - `tools` 默认使用 `[]`（空列表）
-   - `description` 从用户描述中一句话概括
-   只有当用户完全没有提供任何 agent 相关信息时，才简要说明需要什么。
-8. 每个工具调用的 JSON **必须包含**以下两个字段（直接从下方「当前执行上下文」拷贝数值）：
-   - "conversation_id": {conversation_id}
-   - "current_user_id": {current_user_id or 0}
-9. 完成后用自然语言汇报结果，包含 Agent 名称、用途、模型和是否已成功生效。
+1. **创建前必须先用 action=list 查看已有 Agent，避免重复创建。**
+2. 如果用户要新建 Agent，收集足够信息后用 action=create 创建。
+3. 如果用户要更新 Agent，用 action=update。
+4. 输出纯 JSON，不要 markdown 包裹。字段：action、conversation_id、current_user_id、name、description、system_prompt、llm_adapter、tools、icon。
+5. llm_adapter 默认 "tongyi"，tools 默认 []，icon 默认 "smart_toy"。
+6. 缺失字段用合理默认值，不要追问用户。
+7. **去重规则**：
+   - 如果用户要创建的名字和已有 Agent 完全一样，输出 action=duplicate，并说明已有 Agent 的信息，询问用户是使用已有的还是换个名字。
+   - 如果用户说"用已有的"，输出 action=none 表示无需操作。
+   - 如果用户说"换一个"，创建一个不同名字的 Agent。
+8. 完成后用自然语言汇报结果。
 
-当前执行上下文（请直接使用，**不要质疑这些值**）：
+当前已有 Agent: {existing_names}
+后端可选: {", ".join(self.llm_backends.keys())}
+可用 tools: web_search, rag_retrieval, scan_vulnerabilities
+
+当前执行上下文：
 - conversation_id: {conversation_id}
-- current_user_id: {current_user_id or 'unknown'}
+- current_user_id: {current_user_id or 0}
 
-用户原始请求：
+用户请求：
 {user_request}
 """
 
 
     async def _handle_agent_management_request(self, conversation_id: str, messages: List[Dict[str, str]], request_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        target_agent = self.get_agent("agent_builder")
-        if not target_agent:
-            logger.warning("agent_builder 未注册，回退到默认聊天")
-            return await self._handle_default_chat(conversation_id, messages)
+        """Agent 管理：直接调 LLM 输出 JSON → 调用 manage_agent 工具函数。
 
-        # 🎯 解析 current_user_id：优先从 request_context，次之从 conversation 查库
+        绕过 ReAct（HttpChatModel.bind_tools 不可用），用两步法完成：
+        1. LLM 输出 JSON 描述操作
+        2. 框架直接调用 manage_agent.create_agent / update_agent / list_agents
+        """
+        import json as _json
+        import re as _re
+        from backend.utils import manage_agent as _ma
+
+        # 解析 current_user_id
         current_user_id = (request_context or {}).get("current_user_id", "")
         if not current_user_id and conversation_id:
             try:
@@ -833,24 +836,73 @@ class Orchestrator:
             except Exception:
                 pass
 
-        # 🎯 设置 manage_agent 调用上下文，确保工具函数能自动注入身份信息
-        try:
-            import backend.utils.manage_agent as _ma
-            _ma._caller_ctx.set({
-                "current_user_id": current_user_id,
-                "conversation_id": conversation_id
-            })
-        except Exception:
-            pass
+        # 设置 manage_agent 调用上下文
+        _ma._caller_ctx.set({
+            "current_user_id": current_user_id,
+            "conversation_id": conversation_id
+        })
 
         latest_user_request = messages[-1].get("content", "") if messages else ""
         prompt = self._build_agent_management_prompt(latest_user_request, conversation_id, messages, request_context)
-        output_text = await self._call_agent_with_tools(
-            agent=target_agent,
-            prompt=prompt,
-            conversation_id=conversation_id
-        )
-        return {"agent_id": target_agent.agent_id, "content": output_text}
+
+        # Step 1: 直接调 LLM
+        try:
+            backend = self.get_backend("tongyi")
+            resp = await backend.chat([{"role": "user", "content": prompt}])
+            logger.info(f"[AgentMgmt] LLM: {str(resp)[:300]}")
+        except Exception as e:
+            logger.error(f"[AgentMgmt] LLM failed: {e}")
+            return {"agent_id": "agent_builder", "content": f"LLM call failed: {e}"}
+
+        # Step 2: 解析 JSON
+        try:
+            content = str(resp).strip()
+            m = _re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
+            if m:
+                content = m.group(1).strip()
+            payload = _json.loads(content)
+            action = payload.get("action", "create")
+        except (_json.JSONDecodeError, KeyError) as e:
+            logger.error(f"[AgentMgmt] JSON parse failed: {e}")
+            return {"agent_id": "agent_builder", "content": f"Cannot parse response as JSON. Raw: {str(resp)[:500]}"}
+
+        # Step 3: 执行工具
+        try:
+            if action == "list":
+                result_json = _ma.list_agents(_json.dumps(payload))
+                result = _json.loads(result_json)
+                alist = ""
+                if result.get("status") == "success" and "agents" in result:
+                    alist = "\n".join(f"- {a.get('name')} ({a.get('agent_id')})" for a in result["agents"])
+                return {"agent_id": "agent_builder", "content": f"Current agents:\n{alist}"}
+
+            if action == "duplicate":
+                # LLM 检测到重名，告知用户
+                existing = payload.get("existing_name", payload.get("name", ""))
+                return {"agent_id": "agent_builder", "content": f"Agent「{existing}」已存在。请问你想使用已有的 Agent，还是换一个不同的名字创建新 Agent？"}
+
+            if action == "none":
+                return {"agent_id": "agent_builder", "content": "好的，无需操作。"}
+
+            if action == "update":
+                result_json = _ma.update_agent(_json.dumps(payload))
+            else:
+                result_json = _ma.create_agent(_json.dumps(payload))
+
+            result = _json.loads(result_json)
+            logger.info(f"[AgentMgmt] {result.get('status')}: {result.get('message', '')}")
+
+            if result.get("status") == "success":
+                cn = {"create": "Created", "update": "Updated"}.get(action, action)
+                return {
+                    "agent_id": "agent_builder",
+                    "content": f"OK {cn} Agent [{result.get('name', '')}]\nAgent ID: {result.get('agent_id', 'N/A')}\nModel: {result.get('llm_adapter', 'N/A')}\nTools: {result.get('tools', [])}\n{result.get('message', '')}"
+                }
+            else:
+                return {"agent_id": "agent_builder", "content": f"FAILED: {result.get('message', 'unknown error')}"}
+        except Exception as e:
+            logger.error(f"[AgentMgmt] tool failed: {e}")
+            return {"agent_id": "agent_builder", "content": f"Operation failed: {e}"}
 
     async def _handle_mention(self, agent_id: str, conversation_id: str, messages: List[Dict[str, str]], request_context: Optional[Dict[str, Any]] = None) -> Dict[
         str, Any]:

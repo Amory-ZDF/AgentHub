@@ -716,24 +716,28 @@ function openDashboard() { if (!confirmLeaveDirty()) return; state.view='dashboa
 async function openMission(id) {
   if (!confirmLeaveDirty()) return;
   state.view='mission'; state.missionId=id;
-  const m = getMission(); state.runId = m.runs[0].id;
+  const m = getMission();
+  // 找到原始 run（id=run_current），历史消息只加载到原始 run
+  const originalRun = m.runs.find(r => r.id === 'run_current') || m.runs[m.runs.length - 1];
+  state.runId = (m.runs.length > 1 && m.runs[0].id !== 'run_current') ? m.runs[0].id : originalRun.id;
   state.selectedAgentId = m.squad.agents[0]?.id || null;
-  // 异步加载历史聊天消息
-  try {
-    const convId = id.replace('mis_', '');
-    const msgs = await api(`/chat/${convId}/messages`);
-    if (Array.isArray(msgs) && msgs.length > 0) {
-      const run = getRun();
-      run.conversation = msgs.map(msg => ({
-        type: msg.agent_id === 'user' ? 'user' : 'agent',
-        agent: msg.agent_id === 'user' ? '我' : (m.squad.agents.find(a => a.id === msg.agent_id)?.name || msg.agent_id),
-        icon: msg.agent_id === 'user' ? 'person' : (m.squad.agents.find(a => a.id === msg.agent_id)?.icon || 'smart_toy'),
-        text: msg.content,
-        time: msg.created_at
-      }));
+  // 只对原始 run 加载 DB 历史消息，新 run 保留自己的 session 对话
+  if (originalRun && (!originalRun.conversation || originalRun.conversation.length <= 1)) {
+    try {
+      const convId = id.replace('mis_', '');
+      const msgs = await api(`/chat/${convId}/messages`);
+      if (Array.isArray(msgs) && msgs.length > 0) {
+        originalRun.conversation = msgs.map(msg => ({
+          type: msg.agent_id === 'user' ? 'user' : 'agent',
+          agent: msg.agent_id === 'user' ? '我' : (m.squad.agents.find(a => a.id === msg.agent_id)?.name || msg.agent_id),
+          icon: msg.agent_id === 'user' ? 'person' : (m.squad.agents.find(a => a.id === msg.agent_id)?.icon || 'smart_toy'),
+          text: msg.content,
+          time: msg.created_at
+        }));
+      }
+    } catch (e) {
+      console.log('[MISSION] load history failed:', e);
     }
-  } catch (e) {
-    console.log('[MISSION] 加载历史消息失败或没有历史消息:', e);
   }
   render();
 }
@@ -883,7 +887,33 @@ function getAgentKindMeta(kind) {
 }
 
 /* ===== Main render ===== */
+async function refreshCurrentMission() {
+  const m = getMission();
+  if (!m) return;
+  try {
+    const id = parseInt((m.id||'').replace('mis_','')) || 0;
+    // 刷新 Agent 库
+    try {
+      const agentsRes = await api('/agents');
+      if (Array.isArray(agentsRes)) state.customAgents = agentsRes;
+    } catch(e) {}
+    // 刷新 mission squad
+    const resp = await api('/missions/mis_'+id);
+    if (resp && resp.ok && resp.mission) {
+      const idx = state.missions.findIndex(x => x.id === m.id);
+      if (idx >= 0) {
+        const oldRuns = state.missions[idx].runs || [];
+        state.missions[idx] = resp.mission;
+        state.missions[idx].runs = oldRuns;
+      }
+      render();
+      scrollChatToBottom();
+    }
+  } catch(e) { console.warn('refreshCurrentMission:', e); }
+}
+
 function render() {
+  try {
   ensureAllSchemas();
   const app = $('#app');
   app.innerHTML = `
@@ -905,6 +935,11 @@ function render() {
   else if (state.view === 'kb_detail')   canvas.innerHTML = renderKbDetailPage();
   else if (state.view === 'settings')  canvas.innerHTML = renderSettingsPage();
   if (typeof hljs !== 'undefined') hljs.highlightAll();
+  } catch(e) {
+    console.error('render() failed:', e);
+    const app = $('#app');
+    if (app) app.innerHTML = '<div style="padding:40px;text-align:center"><h2>Error</h2><p>'+e.message+'</p><button onclick="location.reload()" style="margin-top:16px;padding:8px 24px;border-radius:8px;background:#6366f1;color:#fff;border:none;cursor:pointer">Refresh</button></div>';
+  }
 }
 
 /* ===================== Dashboard ===================== */
@@ -2166,12 +2201,55 @@ function setAddAgentTab(t) {
   state.addAgentModal.tab = t;
   renderModalAddAgent();
 }
+function refreshAddAgentResults() {
+  // 只更新结果列表，不碰搜索框（保护 IME 输入法状态）
+  const modal = state.addAgentModal;
+  if (!modal) return;
+  const dstMission = state.missions.find(x => x.id === modal.missionId);
+  if (!dstMission) return;
+  const excludeIds = new Set(dstMission.squad.agents.map(a => a.id));
+  const manager = getMissionManager(dstMission);
+  const myLib = getMyLibraryAgents(modal.missionId, excludeIds, modal.search, manager).slice(0, 8);
+  const market = getRecommendedAgents(manager, excludeIds, modal.search).slice(0, 8);
+  const rowAdd = (s, action, badge) => {
+    if (!badge) badge = '';
+    return '<div class="flex items-center gap-3 p-2.5 rounded-lg border border-outline-variant bg-surface-container-lowest hover:border-primary/40">' +
+      '<div class="w-8 h-8 rounded bg-tertiary-container flex items-center justify-center shrink-0">' +
+      '<span class="material-symbols-outlined text-on-tertiary-container text-[16px]">' + escapeHTML(s.icon || getAgentKindMeta(s.kind || 'agent').icon) + '</span></div>' +
+      '<div class="flex-1 min-w-0"><p class="font-label-md text-on-surface truncate">' + escapeHTML(s.name) +
+      '<span class="text-[10px] px-1 rounded ' + (s.kind==='team'?'bg-primary/15 text-primary':'bg-secondary-container text-on-surface-variant') + '">' + getAgentKindMeta(s.kind||'agent').label + '</span>' + badge + '</p>' +
+      '<p class="text-label-sm text-secondary truncate">' + escapeHTML(s.role||'') + '</p></div>' +
+      '<button onclick="' + action + '" class="px-2.5 py-1 rounded text-label-md text-primary hover:bg-primary-container/30 flex items-center gap-1 shrink-0"><span class="material-symbols-outlined text-[16px]">add</span>添加</button></div>';
+  };
+  let html = '';
+  if (modal.tab === 'lib') {
+    if (myLib.length) {
+      html += myLib.map(s => rowAdd(s, s.fromCustomAgent
+        ? "addAgentFromCustomAgent('"+s.id+"','"+modal.missionId+"')"
+        : "addAgentFromLibrary('"+s.fromMissionId+"','"+s.id+"','"+modal.missionId+"')",
+        s.fromCustomAgent
+          ? '<span class="text-[10px] px-1 rounded bg-green-100 text-green-700">后端</span>'
+          : '<span class="text-[10px] px-1 rounded bg-blue-100 text-blue-700">Mission</span>'
+      )).join('');
+    } else {
+      html += '<div class="text-center text-secondary p-md border border-dashed border-outline-variant rounded-lg"><p class="text-label-sm">没有找到匹配的 Agent</p></div>';
+    }
+  } else if (modal.tab === 'market') {
+    if (market.length) {
+      html += market.map(s => rowAdd(s, "addAgentFromMarketToMission('"+s.id+"','"+modal.missionId+"')",
+        '<span class="text-[10px] px-1 rounded bg-amber-100 text-amber-700">市场</span>')).join('');
+    } else {
+      html += '<div class="text-center text-secondary p-md border border-dashed border-outline-variant rounded-lg"><p class="text-label-sm">没有找到匹配的 Agent</p></div>';
+    }
+  }
+  const resultsEl = document.getElementById('add-agent-results');
+  if (resultsEl) resultsEl.innerHTML = html;
+}
+
 function setAddAgentSearch(v) {
   if (!state.addAgentModal) return;
   state.addAgentModal.search = v;
-  renderModalAddAgent();
-  const el = document.getElementById('add-agent-search');
-  if (el) { el.focus(); try { el.setSelectionRange(v.length, v.length); } catch(e){} }
+  refreshAddAgentResults();
 }
 function setAddAgentNLText(v) {
   if (!state.addAgentModal) return;
@@ -2232,12 +2310,6 @@ function renderModalAddAgent() {
   let body = '';
   if (tab === 'lib') {
     body = `
-      <div class="mb-2 relative">
-        <span class="material-symbols-outlined absolute left-2 top-1/2 -translate-y-1/2 text-secondary text-[16px]">search</span>
-        <input id="add-agent-search" type="text" value="${escapeAttr(search)}" oninput="setAddAgentSearch(this.value)"
-          placeholder="按名称 / 职责 / 技能搜索…"
-          class="w-full pl-8 pr-3 py-2 bg-surface-container-lowest border border-outline-variant rounded-lg text-body-md focus:border-primary focus:ring-0"/>
-      </div>
       ${myLib.length
         ? `<div class="space-y-2">${myLib.map(s => rowAdd(s, s.fromCustomAgent
             ? `addAgentFromCustomAgent('${s.id}','${missionId}')`
@@ -2298,7 +2370,16 @@ function renderModalAddAgent() {
           ${tabBtn('market','社区市场','storefront', market.length)}
           ${tabBtn('nl','自然语言描述创建','auto_awesome')}
         </div>
-        <div class="flex-1 overflow-y-auto p-lg">${body}</div>
+        ${tab === 'lib' ? `
+        <div class="px-lg pt-2 pb-1">
+          <div class="relative">
+            <span class="material-symbols-outlined absolute left-2 top-1/2 -translate-y-1/2 text-secondary text-[16px]">search</span>
+            <input id="add-agent-search" type="text" value="${escapeAttr(search)}" oninput="setAddAgentSearch(this.value)"
+              placeholder="按名称 / 职责 / 技能搜索…"
+              class="w-full pl-8 pr-3 py-2 bg-surface-container-lowest border border-outline-variant rounded-lg text-body-md focus:border-primary focus:ring-0"/>
+          </div>
+        </div>` : ''}
+        <div id="add-agent-results" class="flex-1 overflow-y-auto p-lg">${body}</div>
         <div class="px-lg py-md border-t border-outline-variant flex items-center justify-between text-label-sm">
           <p class="text-secondary flex items-center gap-1.5">
             <span class="material-symbols-outlined text-[14px]">info</span>
@@ -2332,7 +2413,6 @@ function _insertAgentToMission(newAgent, dstMission, opts={}) {
   if (mgr && mgr.id !== newAgent.id) {
     if (!Array.isArray(mgr.teamMemberIds)) mgr.teamMemberIds = [];
     if (!mgr.teamMemberIds.includes(newAgent.id)) mgr.teamMemberIds.push(newAgent.id);
-    // 如果当前正处于 Team 详情页 draft，同步 draft.teamMemberIds，避免被旧 draft 覆盖
     if (state.detail && state.detail.type === 'agent' && state.detail.agentId === mgr.id && state.detail.draft) {
       const d = state.detail.draft;
       if (!Array.isArray(d.teamMemberIds)) d.teamMemberIds = [];
@@ -2340,7 +2420,20 @@ function _insertAgentToMission(newAgent, dstMission, opts={}) {
     }
     intent = buildManagerSyncPromptDiff(mgr, newAgent, dstMission);
   }
+
+  // 持久化 squad_config 到后端，防止被 refreshCurrentMission 覆盖
+  saveMissionSquad(dstMission);
+
   return { intent, mgr };
+}
+
+async function saveMissionSquad(m) {
+  try {
+    await api('/missions/' + m.id, {
+      method: 'PUT',
+      body: JSON.stringify({ name: m.name, squad: m.squad })
+    });
+  } catch(e) { console.warn('saveMissionSquad failed:', e); }
 }
 
 // 从我的库添加（被 Modal 调用）
@@ -2353,9 +2446,9 @@ function addAgentFromLibrary(srcMissionId, srcAgentId, dstMissionId) {
   const newAgent = cloneAgentForMission(srcAgent, dst);
   const { intent } = _insertAgentToMission(newAgent, dst);
   closeModalAddAgent();
+  render();
   showToast(`已添加 "${newAgent.name}" 到 Team`, 'success');
-  if (intent) setTimeout(() => { state.missionId = dst.id; openModalAgentDiff(intent); }, 100);
-  else render();
+  if (intent) setTimeout(() => { openModalAgentDiff(intent); }, 200);
 }
 
 // 从市场添加（被 Modal 调用）
@@ -5147,9 +5240,9 @@ function addAgentFromCustomAgent(customAgentId, dstMissionId) {
   }, dst);
   const { intent } = _insertAgentToMission(newAgent, dst);
   closeModalAddAgent();
+  render();
   showToast(`已添加 "${newAgent.name}" 到 Team`, 'success');
-  if (intent) setTimeout(() => { state.missionId = dst.id; openModalAgentDiff(intent); }, 100);
-  else render();
+  if (intent) setTimeout(() => { openModalAgentDiff(intent); }, 200);
 }
 
 function getRecommendedAgents(manager, excludeIds, query) {
@@ -7757,11 +7850,13 @@ function sendChat() {
         run.conversation.push({ type:'agent', agent:targetAgent?.name||'orchestrator', icon:targetAgent?.icon||'hub', time:now(), text: finalContent || '已完成' });
       }
       render(); scrollChatToBottom();
+      setTimeout(() => refreshCurrentMission(), 500);
     } catch (error) {
       const thinkIdx3 = run.conversation.findIndex(m => m.type === 'agent' && m.thinking);
       if (thinkIdx3 !== -1) run.conversation.splice(thinkIdx3, 1);
-      run.conversation.push({ type:'agent', agent:targetAgent.name, icon:targetAgent.icon, time:now(), text:'抱歉，调用后端API时出错了：'+error.message });
+      run.conversation.push({ type:'agent', agent:targetAgent?.name||'orchestrator', icon:targetAgent?.icon||'hub', time:now(), text:'抱歉，调用后端API时出错了：'+error.message });
       render(); scrollChatToBottom();
+      setTimeout(() => refreshCurrentMission(), 500);
     }
   })();
 }

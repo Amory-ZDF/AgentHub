@@ -92,8 +92,10 @@ def _build_create_name(db, user_id: int, requested_name: str) -> str:
     ).first()
     if not existing:
         return requested_name
-    suffix = datetime.now().strftime("%m%d%H%M")
-    return f"{requested_name}_{suffix}"
+    raise ValueError(
+        f"同名 Agent「{requested_name}」已存在 (agent_id={existing.agent_id})。"
+        f"请使用已有 Agent 或换一个名字重新创建。"
+    )
 
 
 def _register_runtime_agent(db_agent: CustomAgentModel) -> None:
@@ -102,6 +104,52 @@ def _register_runtime_agent(db_agent: CustomAgentModel) -> None:
 
     orchestrator = get_orchestrator()
     orchestrator.register_custom_agent(db_agent)
+
+
+def _agent_model_display(llm_adapter: str) -> str:
+    return {"tongyi": "Qwen-Plus", "deepseek": "DeepSeek-Chat", "opencode": "OpenCode Zen"}.get(
+        llm_adapter, llm_adapter.title())
+
+
+def _add_agent_to_mission_squad(db, conversation_id: str, db_agent: CustomAgentModel) -> None:
+    """将 Agent 同步到 Mission 的 squad_config（前端右侧 Team 面板）"""
+    try:
+        conv_id = int(conversation_id)
+    except (ValueError, TypeError):
+        return
+    conv = db.query(Conversation).filter(Conversation.id == conv_id).first()
+    if not conv:
+        return
+    squad = conv.squad_config or {}
+    agents = squad.get("agents", [])
+    if not isinstance(agents, list):
+        agents = []
+    squad_agent = {
+        "id": db_agent.agent_id, "name": db_agent.name,
+        "role": db_agent.description or "", "icon": db_agent.icon or "smart_toy",
+        "systemPrompt": db_agent.system_prompt, "skills": db_agent.tools or [],
+        "mcpTools": [], "model": _agent_model_display(db_agent.llm_adapter),
+        "kind": "agent", "teamMemberIds": [],
+        "memoryConfig": db_agent.memory_config or {"strategy": "window", "windowSize": 10},
+        "planningConfig": db_agent.planning_config or {"mode": "react"},
+        "validationConfig": db_agent.validation_config or {"strategy": "none"}
+    }
+    existing = next((i for i, a in enumerate(agents) if a.get("id") == db_agent.agent_id), None)
+    if existing is not None:
+        agents[existing] = squad_agent
+    else:
+        agents.append(squad_agent)
+    team = next((a for a in agents if a.get("kind") == "team"), None)
+    if team:
+        members = team.get("teamMemberIds", [])
+        if db_agent.agent_id not in members:
+            members.append(db_agent.agent_id)
+            team["teamMemberIds"] = members
+    squad["agents"] = agents
+    conv.squad_config = squad
+    db.add(conv)
+    db.commit()
+    logger.info(f"[manage_agent] squad synced: mission {conversation_id}, {len(agents)} agents")
 
 
 def create_agent(input_content: str) -> str:
@@ -140,6 +188,9 @@ def create_agent(input_content: str) -> str:
         db.commit()
         db.refresh(db_agent)
         _register_runtime_agent(db_agent)
+        cid = payload.get("conversation_id")
+        if cid:
+            _add_agent_to_mission_squad(db, str(cid), db_agent)
         result = {
             "status": "success",
             "action": "create",
@@ -215,6 +266,9 @@ def update_agent(input_content: str) -> str:
         db.commit()
         db.refresh(db_agent)
         _register_runtime_agent(db_agent)
+        cid = payload.get("conversation_id")
+        if cid:
+            _add_agent_to_mission_squad(db, str(cid), db_agent)
         result = {
             "status": "success",
             "action": "update",
