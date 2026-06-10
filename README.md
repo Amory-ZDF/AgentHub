@@ -3,6 +3,7 @@
 <img src="https://img.shields.io/badge/Python-3.11+-blue?logo=python" alt="Python">
 <img src="https://img.shields.io/badge/FastAPI-0.136-009688?logo=fastapi" alt="FastAPI">
 <img src="https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite" alt="SQLite">
+<img src="https://img.shields.io/badge/Status-WIP-orange" alt="Status">
 <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
 
 # AgentHub
@@ -35,34 +36,70 @@
 - 自然语言迭代班底：对话中即可修改 Agent 配置
 - 多 Run 并行：同一 Mission 可开启多个独立运行，互不干扰
 
+### 可配置的大模型
+- 支持接入**通义千问 / DeepSeek / OpenCode** 等兼容 OpenAI 协议的模型
+- 用户可为每个 Agent 独立选择后端模型
+- 启动时自动健康检查，不可用后端自动停用
+- 通过 `.env` 配置 API Key，支持扩展更多模型
+
+### 可配置的 Skill 工具集
+- 内置技能：`web_search` / `rag_retrieval` / `scan_vulnerabilities` / `file_converter`
+- 支持用户自建 Skill：编写 Markdown 描述即可注册为可调用技能
+- Skill 市场：Fork / 发布 / 安装 / 版本回滚
+- 创建 Agent 时可自由组合分配 Skill
+
 ### Agent Builder — 对话式创建 Agent
 - 在对话中用自然语言创建/修改 Agent：「帮我创建一个财报分析专家」
 - 创建后自动同步到 **Agent 库** 和 **Mission 右侧 Team 面板**
 - 智能去重：同名 Agent 会提示用户使用已有还是创建新的
-- 支持为新建 Agent 指定 LLM 后端和工具集
+- 新建 Agent 可指定后端模型和工具集
 
 ### Orchestrator 智能调度
-- 7 级优先级路由：@mention → Agent 管理 → 工作流匹配 → 复杂度路由 → Skill 调用 → 系统查询 → 默认对话
+- **7 级优先级路由**：@mention → Agent 管理 → 工作流匹配 → 复杂度路由 → Skill 调用 → 系统查询 → 默认对话
 - LLM 自动识别意图：简单聊天 / 复杂规划 / Agent 管理
 - 复杂任务自动拆解为子任务，Planner Agent 并行调度执行
 
-### Skill 市场
-- 内置技能：`web_search` / `rag_retrieval` / `scan_vulnerabilities` / `file_converter`
-- 支持 Fork / 发布 / 安装 / 版本回滚
-
-### 多 LLM 后端
-- **通义千问** (qwen-plus) — 默认后端
-- **DeepSeek** (deepseek-chat) — 代码审查
-- **OpenCode Zen** (deepseek-v4-flash-free) — 免费档
-- 启动时自动健康检查，不可用后端自动停用
-
-### 知识库
+### 知识库（基础支持）
 - 客户端解析 PDF / DOCX / XLSX（pdf.js + mammoth + SheetJS）
 - RAG 检索注入对话上下文
 
 ---
 
-## 内置 Agent 团队
+## 迭代计划
+
+### 一期（已完成 ✅）
+- Mission 工作台：创建 Mission、多 Agent Team、对话交互
+- 7 级 Orchestrator 智能路由
+- Agent Builder：对话式创建/修改 Agent
+- Skill 市场：内置 Skill + 用户自建
+- 多模型接入：Tongyi / DeepSeek / OpenCode
+- JWT 注册登录
+- 快速开始部署（单一 FastAPI 进程）
+
+### 二期（规划中 🚧）
+- Agent 详情页完整编辑（记忆策略、规划模式、校验方式）
+- Skill 的 AI 创建与修改
+- 对话中文件输入输出增强（PDF / XLSX / 图片）
+- 移动端适配
+- 知识库完整功能（上传、管理、绑定 Mission）
+
+### 三期（计划中 📋）
+- Agent 市场 / 模板市场
+- 第三方 Agent 平台接入
+- 产品测评与数据看板
+- 任务执行 Trace / Log / Cost 可观测性
+
+### 当前不做 ❌
+- 不做 Agent = 联系人 的 IM 范式
+- 不做节点连线式工作流编排（保留对话语义）
+- 预览编辑代码/PPT（计划中）
+- 语言输入（计划中）
+- 下载/分享 Mission（计划中）
+- 自定义 Hooks 系统（计划中）
+
+---
+
+## 内置 Agent
 
 | Agent | 角色 | 后端 |
 |-------|------|------|
@@ -73,16 +110,6 @@
 | `product_manager` | 需求分析与 PRD 撰写 | tongyi |
 | `opencode_coder` | 免费代码助手 | opencode |
 | `opencode_bigpickle` | 实验性通用 Agent | opencode |
-
----
-
-## 目标用户
-
-| 用户 | 场景 |
-|------|------|
-| **效率型知识工作者** | 财报分析、竞品周报、文档翻译 — 把重复性脑力任务标准化 |
-| **AI 工程师 / 极客** | 搭建自定义 Agent Team，深度定制工作流 |
-| **团队 Lead** | 将工作流结合业务场景提效、沉淀团队知识 |
 
 ---
 
@@ -97,12 +124,12 @@ pip install fastapi uvicorn sqlalchemy python-dotenv dashscope httpx \
     langchain langchain-core langgraph langchain-chroma langchain-text-splitters \
     passlib python-jose bcrypt python-multipart loguru pyyaml
 
-# 3. 启动（单一进程托管前后端）
+# 3. 启动
 cd AgentHub-1
 python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 ```
 
-打开 `http://localhost:8000`，注册账号后即可使用。
+打开 `http://localhost:8000`
 
 ---
 
@@ -112,7 +139,7 @@ python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 |------|------|
 | `DASHSCOPE_API_KEY` | 通义千问 API Key（必填） |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key（必填） |
-| `OPENCODE_API_KEY` | OpenCode Zen API Key（可选，免费档） |
+| `OPENCODE_API_KEY` | OpenCode Zen API Key（可选） |
 | `JWT_SECRET` | JWT 签名密钥 |
 | `WEBSEARCH_API_KEY` | 网络搜索 API Key（可选） |
 
@@ -125,17 +152,17 @@ AgentHub/
 ├── backend/
 │   ├── app/api/              # auth / chat / agents / missions / skills / knowledge
 │   ├── core/
-│   │   └── orchestrator.py   # 核心调度器（2439 行，7 级路由 + 动态规划）
-│   ├── agents/               # Agent 实现（planner / summarizer / custom_agent）
+│   │   └── orchestrator.py   # 核心调度器（7 级路由 + 动态规划）
+│   ├── agents/               # Agent 实现
 │   ├── utils/
 │   │   └── manage_agent.py   # Agent 创建/修改/查询工具
-│   ├── models/               # SQLAlchemy 数据模型
-│   ├── llm/backends/         # tongyi / deepseek / opencode 后端
-│   └── config/prompts/       # YAML 提示词配置
+│   ├── models/               # 数据模型
+│   ├── llm/backends/         # LLM 后端适配
+│   └── config/prompts/       # YAML 提示词
 ├── AgentHub-my flicker/
-│   └── index.html            # 单页前端（8000+ 行）
+│   └── index.html            # 单页前端
 ├── custom_agents.yaml        # 内置 Agent 定义
-└── .env                      # API Key 配置（不入库）
+└── .env                      # API Key（不入库）
 ```
 
 ---
