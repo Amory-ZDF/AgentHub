@@ -541,7 +541,7 @@ app.delete('/api/conversations/:id', auth, (req, res) => {
 
 /* ---------------------------------------------------------- static frontend */
 
-// 把 /Users/.../AgentHub-my flicker 目录直接对外提供 → 同域访问 index.html
+// 把 frontend 目录直接对外提供 → 同域访问 index.html
 app.use(express.static(path.join(__dirname, '..')));
 
 // SPA fallback：未匹配 API/静态文件时，返回 index.html（注意 4.x 这里只是兜底）

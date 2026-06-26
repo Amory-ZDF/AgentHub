@@ -166,7 +166,7 @@ def create_app() -> FastAPI:
     # 静态托管前端（必须放最后，确保 API 路由优先级更高）
     from fastapi.staticfiles import StaticFiles
     import os
-    frontend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'AgentHub-my flicker'))
+    frontend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'frontend'))
     if os.path.isdir(frontend_dir):
         try:
             app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")

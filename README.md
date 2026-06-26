@@ -98,6 +98,16 @@
 
 ---
 
+
+## 文档
+
+- [产品 PRD](docs/AgentHub_PRD.md)
+- [技术文档](docs/AgentHub_技术文档.md)
+
+> 仓库只保留 Markdown 源文档；PDF、向量库索引与本地知识库上传文件不再入库。
+
+---
+
 ## 快速开始
 
 ```bash
@@ -110,7 +120,7 @@ pip install fastapi uvicorn sqlalchemy python-dotenv dashscope httpx \
     passlib python-jose bcrypt python-multipart loguru pyyaml
 
 # 3. 启动
-cd AgentHub-1
+cd AgentHub
 python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -134,20 +144,24 @@ python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
 
 ```
 AgentHub/
+├── README.md
+├── docs/
+│   ├── AgentHub_PRD.md       # 产品需求文档
+│   └── AgentHub_技术文档.md   # 技术方案与架构说明
 ├── backend/
-│   ├── app/api/              # auth / chat / agents / missions / skills / knowledge
+│   ├── app/                  # FastAPI 应用与 API
 │   ├── core/
 │   │   └── orchestrator.py   # 核心调度器（7 级路由 + 动态规划）
 │   ├── agents/               # Agent 实现
-│   ├── utils/
-│   │   └── manage_agent.py   # Agent 创建/修改/查询工具
+│   ├── skills/               # 内置 Skill 描述
+│   ├── utils/                # Agent 管理、文件、搜索等工具
 │   ├── models/               # 数据模型
-│   ├── llm/backends/         # LLM 后端适配
-│   └── config/prompts/       # YAML 提示词
-├── AgentHub-my flicker/
-│   └── index.html            # 单页前端
-├── custom_agents.yaml        # 内置 Agent 定义
-└── .env                      # API Key（不入库）
+│   ├── llm/                  # LLM 后端适配
+│   └── custom_agents.yaml    # 内置 Agent 定义
+├── frontend/
+│   ├── index.html            # 单页前端
+│   └── server/               # 本地演示服务
+└── pytest.ini
 ```
 
 ---

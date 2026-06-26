@@ -688,7 +688,7 @@ FastAPI 直接托管前端静态文件：
 ```python
 from fastapi.staticfiles import StaticFiles
 
-frontend_dir = os.path.abspath(os.path.join(__file__, '..', '..', 'AgentHub-my flicker'))
+frontend_dir = os.path.abspath(os.path.join(__file__, '..', '..', 'frontend'))
 app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
 ```
 

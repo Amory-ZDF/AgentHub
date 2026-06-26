@@ -280,3 +280,8 @@ updateAgentSkill*
 
 # CodeFlicker / agent metadata
 .codeflicker/
+
+# Generated docs / local knowledge-store artifacts
+*.pdf
+chroma_db/
+data/knowledge/
